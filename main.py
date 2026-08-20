@@ -52,7 +52,7 @@ async def fetch_real_sub(sub_id: str, request: Request, mx, cur) -> Response:
         if h in request.headers:
             forward_headers[h] = request.headers[h]
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
         try:
             resp = await client.get(
                 url,
