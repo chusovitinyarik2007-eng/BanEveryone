@@ -54,7 +54,13 @@ async def fetch_real_sub(sub_id: str, request: Request, mx, cur) -> Response:
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         try:
-            resp = await client.get(url, headers=forward_headers)
+            resp = await client.get(
+                url,
+                headers={
+                    **forward_headers,
+                    "Host": "main.service-ya.fun",  # как в сертификате
+                },
+            )
         except Exception as e:
             return {"ERROR" : str(e)}
 
