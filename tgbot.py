@@ -6,7 +6,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiohttp_socks import ProxyConnector
-connector = ProxyConnector.from_url("socks5://127.0.0.1:10808")
+connector = ProxyConnector.from_url("http://127.0.0.1:10808")
 session = AiohttpSession(connector=connector)
 
 import db_driver
