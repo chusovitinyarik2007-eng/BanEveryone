@@ -15,6 +15,7 @@ sub = os.getenv("SUB", "sub")
 XUI_SUB_URL = os.getenv("URL")
 vpn_name = os.getenv("VPN", "Сосиски VPN")
 start_at = int(os.getenv("PORTSERVER", 3322))
+whiteList = os.getenv("WHITELIST", "").split(",")
 
 DENIED_LINK = (
     "vless://00000000-0000-0000-0000-000000000001@127.0.0.1:443"
@@ -29,6 +30,8 @@ DENIED_BODY = base64.b64encode(DENIED_LINK.encode()).decode()
 @app.api_route("/"+sub+"/{uuid}", methods=["GET", "POST"])
 async def get_sub(request: Request):
     uuid = str(request.url).split('/')[-1]
+    if uuid in whiteList:
+        return await fetch_real_sub(uuid, request, 1, 100000)
     hwid = request.headers.get('x-hwid') or request.headers.get("X-HWID")
     if not hwid:
         await tgbot.setmsg_admin(f'Неопознанное устройство: {uuid}')
