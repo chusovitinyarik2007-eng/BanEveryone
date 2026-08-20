@@ -113,17 +113,28 @@ async def run_bot():
     while True:
         try:
             await tgbot.dp.start_polling(tgbot.bot)
+        except asyncio.CancelledError:
+            break
         except Exception as e:
             print("Bot error:", e)
             await asyncio.sleep(5)
 
 async def main():
-    config = uvicorn.Config(app, host="0.0.0.0", port=start_at, log_level="info")
+    config = uvicorn.Config(app, host="127.0.0.1", port=start_at, log_level="info")
     server = uvicorn.Server(config)
-    await asyncio.gather(
-        server.serve(),
-        run_bot(),
-    )
+
+    bot_task = asyncio.create_task(run_bot())
+    server_task = asyncio.create_task(server.serve())
+
+    try:
+        await server_task
+    finally:
+        bot_task.cancel()
+        try:
+            await bot_task
+        except asyncio.CancelledError:
+            pass
+        await tgbot.bot.session.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
