@@ -56,7 +56,7 @@ async def fetch_real_sub(sub_id: str, request: Request, mx, cur) -> Response:
         try:
             resp = await client.get(url, headers=forward_headers)
         except Exception as e:
-            return {"ERROR" : "ERROR"}
+            return {"ERROR" : str(e)}
 
     if resp.status_code != 200 or not resp.content:
         return {"ERROR" : "ERROR"}
