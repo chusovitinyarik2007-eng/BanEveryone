@@ -27,6 +27,7 @@ async def start(message: Message):
                          "/info - информация о пользователе\n"
                          "/setlimit - установить максимальное количество устройств по uuid\n"
                          "/clear uuid - очистить список hwid\n"
+                         "/allinfo - информация о всех подключениях"
                          )
 
 @dp.message(Command("info"))
@@ -69,6 +70,21 @@ async def clear(message: Message, command: CommandObject):
     db_driver.update_device_data_by_uuid(uuid, [])
 
     await message.answer(f"Изменено:\n{get_info(uuid)}")
+
+@dp.message(Command("allinfo"))
+async def allinfo(message: Message, command: CommandObject):
+    if not is_admin(message.from_user.id):
+        return
+    if not command.args:
+        await message.answer("Использование: /allinfo max_hwid")
+        return
+    id = command.args.strip()
+    try:
+        id = int(id)
+    except Exception:
+        await message.answer("Ошибка ввода")
+    r = db_driver.find_all_less(id)
+    await message.answer(f"Все записи меньше ")
 
 def get_info(uuid):
     mx, hwds = db_driver.get_data_by_uuid(uuid)

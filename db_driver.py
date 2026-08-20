@@ -75,3 +75,19 @@ def get_data_by_uuid(uuid):
             return (mx_device, hwid)
     finally:
         db.close()
+
+def find_all_less(id):
+    db = sqlite3.connect("subserver.db")
+    try:
+        with db:
+            cur = db.cursor()
+            cur.execute('''
+            SELECT * FROM Users WHERE max_device < ?''', (id,))
+            row = cur.fetchone()
+            rows = []
+            for w in row:
+                rows.append(w)
+            return rows
+    finally:
+        db.close()
+
