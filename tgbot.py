@@ -1,11 +1,12 @@
 import os
 
+from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
 import db_driver
-
+load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 admins = list(map(int, os.getenv("ADMINS", "1234").split(',')))
 bot = Bot(token=BOT_TOKEN)

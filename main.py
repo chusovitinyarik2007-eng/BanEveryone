@@ -3,11 +3,13 @@ import base64
 import os
 
 import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response
 import uvicorn
 import db_driver
 import tgbot
 
+load_dotenv()
 app = FastAPI()
 sub = os.getenv("SUB", "sub")
 XUI_SUB_URL = os.getenv("URL")
