@@ -6,8 +6,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiohttp_socks import ProxyConnector
-connector = ProxyConnector.from_url("http://127.0.0.1:10808")
-session = AiohttpSession(connector=connector)
+session = AiohttpSession("http://127.0.0.1:10808")
 
 import db_driver
 load_dotenv()
@@ -50,6 +49,10 @@ async def setlimit(message: Message, command: CommandObject):
         await message.answer("Использование: /setlimit <uuid> <max_hwid>")
         return
 
+    parts = command.args.strip().split()
+    if len(parts) != 2:
+        await message.answer("Использование: /setlimit <uuid> <max_hwid>")
+        return
     uuid, limit = command.args.split()
     db_driver.update_max_device_data_by_uuid(uuid, limit)
     await message.answer(f"Изменено:\n{get_info(uuid)}")
