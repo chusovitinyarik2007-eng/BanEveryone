@@ -78,13 +78,13 @@ async def allinfo(message: Message, command: CommandObject):
     if not command.args:
         await message.answer("Использование: /allinfo max_hwid")
         return
-    id = command.args.strip()
+    mx = command.args.strip()
     try:
-        id = int(id)
+        mx = int(mx)
     except Exception:
         await message.answer("Ошибка ввода")
-    r = db_driver.find_all_less(id)
-    await message.answer(f"Все записи меньше {id}:" + "\n" +r)
+    r = db_driver.find_all_less(mx)
+    await message.answer(f"Все записи меньше {id}:" + "\n" +'\n'.join(map(str, r)))
 
 def get_info(uuid):
     mx, hwds = db_driver.get_data_by_uuid(uuid)

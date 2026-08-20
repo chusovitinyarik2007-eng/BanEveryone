@@ -83,7 +83,7 @@ def find_all_less(mx):
             cur = db.cursor()
             cur.execute('''
             SELECT * FROM Users WHERE max_device < ?''', (mx,))
-            row = cur.fetchone()
+            row = cur.fetchall()
             rows = []
             for w in row:
                 rows.append(w)
