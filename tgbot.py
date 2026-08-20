@@ -4,12 +4,16 @@ from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiohttp_socks import ProxyConnector
+connector = ProxyConnector.from_url("socks5://127.0.0.1:10808")
+session = AiohttpSession(connector=connector)
 
 import db_driver
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 admins = list(map(int, os.getenv("ADMINS", "1234").split(',')))
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(token=BOT_TOKEN, session=session)
 dp = Dispatcher()
 
 def is_admin(id):
