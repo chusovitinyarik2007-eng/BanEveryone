@@ -84,7 +84,7 @@ async def allinfo(message: Message, command: CommandObject):
     except Exception:
         await message.answer("Ошибка ввода")
     r = db_driver.find_all_less(id)
-    await message.answer(f"Все записи меньше {id}:\n{'\n'.join(map(str, r))}")
+    await message.answer(f"Все записи меньше {id}:" + "\n" +'\n'.join(map(str, r)))
 
 def get_info(uuid):
     mx, hwds = db_driver.get_data_by_uuid(uuid)
