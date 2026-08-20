@@ -31,10 +31,12 @@ async def get_sub(request: Request):
     uuid = str(request.url).split('/')[-1]
     hwid = request.headers.get('x-hwid') or request.headers.get("X-HWID")
     if not hwid:
+        await tgbot.setmsg_admin(f'Неопознанное устройство: {uuid}')
         return make_denied_response()
 
     mx_devices, hwids = db_driver.get_data_by_uuid(uuid)
     if mx_devices <= len(hwids) and hwid not in hwids:
+        await tgbot.setmsg_admin(f'Попытка повторного входа: {uuid}')
         return make_denied_response()
     else:
         if hwid in hwids:
@@ -62,6 +64,7 @@ async def fetch_real_sub(sub_id: str, request: Request, mx, cur) -> Response:
                 },
             )
         except Exception as e:
+            await tgbot.setmsg_admin(f'Error: {e}')
             return {"ERROR" : str(e)}
 
     if resp.status_code != 200 or not resp.content:

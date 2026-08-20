@@ -75,3 +75,6 @@ def get_info(uuid):
     return (             f"UUID: {uuid}\n"
                          f"MAX_HWIDS: {mx}\n"
                          f"CURRENT_HWIDS: {len(hwds)}")
+
+async def setmsg_admin(text):
+    await bot.send_message(admins[0], text)
