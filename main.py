@@ -1,13 +1,17 @@
 import asyncio
 import base64
 import os
-
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response
 import uvicorn
+from backup_db import backup_schedule
+
+import backup_db
+import classes
 import db_driver
 import tgbot
+from xui_connection import sync_names_with_panel
 
 load_dotenv()
 app = FastAPI()
@@ -30,23 +34,28 @@ DENIED_BODY = base64.b64encode(DENIED_LINK.encode()).decode()
 @app.api_route("/"+sub+"/{uuid}", methods=["GET", "POST"])
 async def get_sub(request: Request):
     uuid = str(request.url).split('/')[-1]
+
+    user = db_driver.get_data_by(uuid)
+    name = user.name
+    mx_devices = user.max_device
+    hwids = user.current_device
+
     if uuid in whiteList:
         return await fetch_real_sub(uuid, request, 1, 100000)
     hwid = request.headers.get('x-hwid') or request.headers.get("X-HWID")
     if not hwid:
-        await tgbot.setmsg_admin(f'Неопознанное устройство: {uuid}')
+        await tgbot.setmsg_admin(f'Неопознанное устройство: {name}')
         return make_denied_response()
 
-    mx_devices, hwids = db_driver.get_data_by_uuid(uuid)
     if mx_devices <= len(hwids) and hwid not in hwids:
-        await tgbot.setmsg_admin(f'Попытка повторного входа: {uuid}')
+        await tgbot.setmsg_admin(f'Попытка повторного входа: {name}')
         return make_denied_response()
     else:
         if hwid in hwids:
             return await fetch_real_sub(uuid, request, mx_devices, len(hwids))
         else:
-            hwids.append(hwid)
-            db_driver.update_device_data_by_uuid(uuid, hwids)
+            user.current_device.append(hwid)
+            db_driver.update_device_data_by(user)
             return await fetch_real_sub(uuid, request, mx_devices, len(hwids))
 
 async def fetch_real_sub(sub_id: str, request: Request, mx, cur) -> Response:
@@ -120,20 +129,26 @@ async def run_bot():
             await asyncio.sleep(5)
 
 async def main():
+    db_driver.init_db()
+    await sync_names_with_panel()
+
     config = uvicorn.Config(app, host="127.0.0.1", port=start_at, log_level="info")
     server = uvicorn.Server(config)
 
     bot_task = asyncio.create_task(run_bot())
     server_task = asyncio.create_task(server.serve())
+    backup = asyncio.create_task(backup_schedule())
 
     try:
         await server_task
     finally:
         bot_task.cancel()
-        try:
-            await bot_task
-        except asyncio.CancelledError:
-            pass
+        backup.cancel()
+        for t in (bot_task, backup):
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
         await tgbot.bot.session.close()
 
 if __name__ == "__main__":
