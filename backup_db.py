@@ -31,15 +31,15 @@ async def backup_db():
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
+    return
 
-async def seconds_until_midnight() -> float:
+def seconds_until_midnight() -> float:
     now = datetime.now()
     nxt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     return (nxt - now).total_seconds()
 
 async def backup_schedule():
     await asyncio.sleep(5)
-    await backup_db()
     while True:
         wait = seconds_until_midnight()
         print(f"next backup in {wait:.0f}s")
