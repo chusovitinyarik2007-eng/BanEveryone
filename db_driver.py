@@ -149,3 +149,13 @@ def find_all_less(mx):
     finally:
         db.close()
 
+def is_user_exist(uuid_or_name):
+    db = sqlite3.connect("subserver.db")
+    with db:
+        cur = db.cursor()
+        cur.execute('''
+            SELECT EXISTS (SELECT 1 FROM Users WHERE uuid = ? OR name = ?)
+        ''', (uuid_or_name, uuid_or_name))
+        res = cur.fetchone()[0]
+        return True if res else False
+

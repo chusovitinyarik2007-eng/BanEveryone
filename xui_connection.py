@@ -38,7 +38,7 @@ async def get_users_uuid_names():
                 users[uuid] = name or 'n/a'
     return users
 
-async def sync_names_with_panel():
+async def sync_names_with_panel(uuid = None):
     currnt_users = db_driver.get_all_uuid()
     all_users = await get_users_uuid_names()
     for usr in currnt_users:
@@ -46,4 +46,8 @@ async def sync_names_with_panel():
         db_driver.update_name_by_uuid(usr, name)
     for sub_id, email in all_users.items():
         db_driver.update_name_by_uuid(sub_id, email)
+        if uuid == sub_id:
+            return True
     print("Successfully sync names with panel")
+    if uuid is not None:
+        return False

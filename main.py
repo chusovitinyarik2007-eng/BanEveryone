@@ -5,6 +5,8 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response
 import uvicorn
+
+import xui_connection
 from backup_db import backup_schedule
 
 import backup_db
@@ -34,6 +36,10 @@ DENIED_BODY = base64.b64encode(DENIED_LINK.encode()).decode()
 @app.api_route("/"+sub+"/{uuid}", methods=["GET", "POST"])
 async def get_sub(request: Request):
     uuid = str(request.url).split('/')[-1]
+    if not db_driver.is_user_exist(uuid):
+        r = await xui_connection.sync_names_with_panel(uuid)
+        if not r:
+            return make_denied_response()
 
     user = db_driver.get_data_by(uuid)
     name = user.name
