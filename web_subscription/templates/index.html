@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ru" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }} — подписка</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="bg"></div>
+
+  <header class="top">
+    <div class="brand">{{ title }}</div>
+    <button type="button" class="theme-btn" id="themeToggle">Тема</button>
+  </header>
+
+  <main class="wrap">
+    <!-- is_active: true/false из Python -->
+    <section class="card {% if is_active %}is-active{% else %}is-inactive{% endif %}">
+      <p class="eyebrow">Подписка</p>
+      <h1>{{ name }}</h1>
+      <p class="lead">Эта страница только для просмотра. Чтобы пользоваться VPN, добавьте ссылку в клиент.</p>
+
+      <div class="grid">
+        <div class="stat">
+          <span class="label">Конец подписки</span>
+          <span class="value">{{ date_expire }}<br> {{ days }} дн.</span>
+        </div>
+        <div class="stat">
+          <span class="label">Трафик</span>
+          <span class="value">{{ current_usage_traffic }} из {{ total_traffic }} ГБ</span>
+        </div>
+        <div class="stat">
+          <span class="label">Устройства</span>
+          <span class="value">{{ current_devices }} из {{ max_devices }}</span>
+        </div>
+        <div class="stat">
+          <span class="label">Статус</span>
+          {% if is_active %}
+            <span class="value ok">Активна</span>
+          {% else %}
+            <span class="value error">Неактивна</span>
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="row">
+        <span class="label">ID</span>
+        <code class="uuid">{{ uuid }}</code>
+      </div>
+
+      <a class="support-btn" href="https://t.me/yar1k_ch" target="_blank" rel="noopener noreferrer">
+        Написать в поддержку
+      </a>
+    </section>
+  </main>
+
+  <script>
+  (function () {
+    var root = document.documentElement;
+    var key = "theme";
+
+    function apply(theme) {
+      root.setAttribute("data-theme", theme);
+      try { localStorage.setItem(key, theme); } catch (e) {}
+    }
+
+    try {
+      var saved = localStorage.getItem(key);
+      if (saved === "light" || saved === "dark") apply(saved);
+    } catch (e) {}
+
+    document.addEventListener("click", function (e) {
+      var btn = e.target.closest("#themeToggle");
+      if (!btn) return;
+      var now = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+      apply(now);
+    });
+  })();
+  </script>
+</body>
+</html>

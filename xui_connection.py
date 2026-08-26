@@ -11,6 +11,20 @@ load_dotenv()
 XUI_BASE = os.getenv("XUI_BASE", "").rstrip("/")
 XUI_TOKEN = os.getenv("XUI_TOKEN", "")
 
+async def get_user_info(name):
+    headers = {
+        "Authorization": f"Bearer {XUI_TOKEN}",
+        "Accept": "application/json",
+    }
+    async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
+        r = await client.get(f"{XUI_BASE}/panel/api/clients/get/{name}", headers=headers)
+        print("inbounds", r.status_code, r.text[:200])
+        r.raise_for_status()
+        data = r.json()
+    if not data.get("success"):
+        print("inbound list failed")
+        return None
+    return data
 
 async def get_users_uuid_names():
     users = {}

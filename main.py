@@ -5,10 +5,9 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response
 import uvicorn
-
+from web_subscription.sub_page_loader import *
 import xui_connection
 from backup_db import backup_schedule
-
 import backup_db
 import classes
 import db_driver
@@ -17,6 +16,7 @@ from xui_connection import sync_names_with_panel
 
 load_dotenv()
 app = FastAPI()
+app.mount("/static", StaticFiles(directory="web_subscription/static"), name="static")
 sub = os.getenv("SUB", "sub")
 XUI_SUB_URL = os.getenv("URL")
 vpn_name = os.getenv("VPN", "Сосиски VPN")
@@ -36,6 +36,9 @@ DENIED_BODY = base64.b64encode(DENIED_LINK.encode()).decode()
 @app.api_route("/"+sub+"/{uuid}", methods=["GET", "POST"])
 async def get_sub(request: Request):
     uuid = str(request.url).split('/')[-1]
+    if is_browser(request):
+        return await send_sub_page(request, vpn_name, uuid)
+
     if not db_driver.is_user_exist(uuid):
         r = await xui_connection.sync_names_with_panel(uuid)
         if not r:
@@ -124,6 +127,32 @@ def make_denied_response() -> Response:
     }
     return Response(content=DENIED_BODY, media_type="text/plain", headers=headers)
 
+def is_browser(request: Request) -> bool:
+    accept = (request.headers.get("accept") or "").lower()
+    ua = (request.headers.get("user-agent") or "").lower()
+    hwid = request.headers.get("x-hwid") or request.headers.get("X-HWID")
+
+    if hwid:
+        print("NOT BROWSER! HWID!")
+        return False  # клиент VPN
+
+    vpn_ua = ("happ", "v2ray", "clash", "sing-box", "shadowrocket",
+              "nekobox", "stash", "quantumult", "surge", "loon")
+    if any(x in ua for x in vpn_ua):
+        print("NOT BROWSER! VPN CLIENT!")
+        return False
+
+    if "text/html" in accept:
+        print("BROWSER!")
+        return True
+
+    # запас: типичный браузерный UA без hwid
+    if any(x in ua for x in ("mozilla", "chrome", "safari", "firefox", "edg")):
+        print("BROWSER!")
+        return True
+    print("NO ONE MATCH!")
+    return False
+
 async def run_bot():
     while True:
         try:
@@ -144,13 +173,15 @@ async def main():
     bot_task = asyncio.create_task(run_bot())
     server_task = asyncio.create_task(server.serve())
     backup = asyncio.create_task(backup_schedule())
+    trash = asyncio.create_task(db_driver.clear_trash_loop())
 
     try:
         await server_task
     finally:
         bot_task.cancel()
         backup.cancel()
-        for t in (bot_task, backup):
+        trash.cancel()
+        for t in (bot_task, backup, trash):
             try:
                 await t
             except asyncio.CancelledError:

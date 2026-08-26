@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sqlite3
 import json
@@ -5,9 +6,11 @@ import warnings
 from dotenv import load_dotenv
 
 import classes
+import xui_connection
 
 load_dotenv()
 def_size = int(os.getenv("def_size", "50"))
+clear_trash = int(os.getenv("CLEAR_TRASH_EVERY_MIN", "60"))
 
 def init_db():
     db = sqlite3.connect("subserver.db")
@@ -33,11 +36,6 @@ def update_name_by_uuid(uuid, name):
     with db:
         cur = db.cursor()
         cur.execute("UPDATE Users SET name = ? WHERE uuid = ?", (name, uuid))
-        if cur.rowcount == 0:
-            cur.execute(
-                "INSERT INTO Users (uuid, max_device, hwid, name) VALUES (?, ?, ?, ?)",
-                (uuid, def_size, "[]", name),
-            )
     db.close()
 
 def get_all_uuid():
@@ -158,4 +156,27 @@ def is_user_exist(uuid_or_name):
         ''', (uuid_or_name, uuid_or_name))
         res = cur.fetchone()[0]
         return True if res else False
+
+async def clear_trash_loop():
+    await asyncio.sleep(5)
+    while True:
+        try:
+            users = await xui_connection.get_users_uuid_names()
+            users = set(users.keys())
+            db = sqlite3.connect("subserver.db")
+            try:
+                with db:
+                    cur = db.cursor()
+                    cur.execute('''SELECT uuid FROM Users''')
+                    db_uuids = [i[0] for i in cur.fetchall()]
+                    for uuid in db_uuids:
+                        if uuid not in users:
+                            cur.execute("DELETE FROM Users WHERE uuid = ?", (uuid,))
+                            print(f"removed trash uuid: {uuid}")
+            finally:
+                db.close()
+        except Exception as e:
+            warnings.warn(f"Error while clearing trash loop: {e}")
+
+        await asyncio.sleep(clear_trash * 60)
 
