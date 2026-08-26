@@ -42,7 +42,7 @@ async def backup_schedule():
     await asyncio.sleep(5)
     while True:
         wait = seconds_until_midnight()
-        await tgbot.setmsg_admin(f'Next backup will ba in {wait} seconds. \nAt 00:00:00\nIts {(int(wait) // 60) // 60}h, {(int(wait) // 60) % 60 }m, '
+        await tgbot.setmsg_admin(f'Next backup will be in {wait} seconds. \nAt 00:00:00\nIts {(int(wait) // 60) // 60}h, {(int(wait) // 60) % 60 }m, '
                                  f'{int(wait) % 60}s.')
         await asyncio.sleep(wait)
         try:
