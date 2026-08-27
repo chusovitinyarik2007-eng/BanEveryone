@@ -24,7 +24,7 @@ async def send_sub_page(request: Request, vpn_name, uuid):
     current_date = datetime.now()
     time_left = expiry_date - current_date
 
-    current_traffic = int(data_all["usedTraffic"])/1024/1024//1024
+    current_traffic = round(data_all["usedTraffic"]/1024/1024/1024, 2)
     total_traffic = int(data["totalGB"])/1024/1024//1024
 
     isactive = data["enable"]
