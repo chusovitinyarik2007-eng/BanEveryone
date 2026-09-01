@@ -6,7 +6,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiohttp_socks import ProxyConnector
-
+from classes import settings
 import db_driver
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -30,7 +30,13 @@ async def start(message: Message):
                          "/info - информация о пользователе\n"
                          "/setlimit - установить максимальное количество устройств по uuid\n"
                          "/clear uuid - очистить список hwid\n"
-                         "/allinfo - информация о всех подключениях"
+                         "/allinfo - информация о всех подключениях\n"
+                         "/backup - бэкап базы данных\n"
+                         "/restset <1, 2, 3...> - задать подключения с ограниченим\n"
+                         "/restadd <number> - добавить подключение с огруничением\n"
+                         "/restshow - показать подключения с ограничениями\n"
+                         "/setgb <number> задать базовое ограничение гб\n"
+
                          )
 
 @dp.message(Command("info"))
@@ -91,8 +97,67 @@ async def allinfo(message: Message, command: CommandObject):
 
 @dp.message(Command("backup"))
 async def backup(message: Message, command: CommandObject):
+    if not is_admin(message.from_user.id):
+        return
     from backup_db import backup_db
     await backup_db()
+
+@dp.message(Command("restset"))
+async def restset(message: Message, command: CommandObject):
+    if not is_admin(message.from_user.id):
+        return
+    if not command.args:
+        await message.answer("Использование: /restset <1, 2, 3...>")
+        return
+    inbounds = command.args.strip().replace(' ', '').split(",")
+    settings['restricted_inbounds'] = inbounds
+    db_driver.update_settings()
+    await message.answer(f"Найстройки изменены. Ограничения действуют для следующих id подключений: {", ".join(inbounds)}",
+                         parse_mode="HTML")
+
+
+@dp.message(Command("restshow"))
+async def restshow(message: Message, command: CommandObject):
+    if not is_admin(message.from_user.id):
+        return
+    await message.answer(f"Ограничения действуют для следующих id подключений: "
+                         f"{", ".join(settings['restricted_inbounds'])}",
+                         parse_mode="HTML")
+
+@dp.message(Command("restadd"))
+async def restadd(message: Message, command: CommandObject):
+    if not is_admin(message.from_user.id):
+        return
+    if not command.args:
+        await message.answer("Использование: /restadd <1, 2, 3...>")
+        return
+    inbounds = command.args.strip().replace(' ', '').split(",")
+    for i in inbounds:
+        if i not in settings['restricted_inbounds']:
+            settings['restricted_inbounds'].append(i)
+    db_driver.update_settings()
+    await message.answer(f"Найстройки изменены. Ограничения действуют для следующих id подключений: "
+                         f"{", ".join(settings['restricted_inbounds'])}",
+                         parse_mode="HTML")
+
+@dp.message(Command("setgbdef"))
+async def setgb(message: Message, command: CommandObject):
+    if not is_admin(message.from_user.id):
+        return
+    if not command.args:
+        await message.answer("Использование: /setgbdef <number>")
+        return
+    gb = command.args.strip()
+    try:
+        gb = int(gb)
+    except Exception:
+        await message.answer(f"Ошибка, использование: /setgbdef <number>")
+        return
+    settings["base_gb"] = gb * 1024**3
+    db_driver.update_settings()
+    await message.answer(f"Найстройки изменены. Ограничения действуют для следующих id подключений: "
+                         f"{", ".join(settings['restricted_inbounds'])}",
+                         parse_mode="HTML")
 
 def get_info(uuid):
     user = db_driver.get_data_by(uuid)

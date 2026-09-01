@@ -4,7 +4,7 @@ import sqlite3
 import json
 import warnings
 from dotenv import load_dotenv
-
+from classes import def_sett, settings
 import classes
 import xui_connection
 
@@ -23,11 +23,33 @@ def init_db():
         hwid TEXT NOT NULL
         )
         ''')
+        cur.execute("""
+                        CREATE TABLE IF NOT EXISTS settings (
+                            key TEXT PRIMARY KEY,
+                            value TEXT
+                        )
+                    """)
+        for key, val in def_sett.items():
+            js = json.dumps(val)
+            cur.execute('''
+                INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)
+            ''', (key, js))
         try:
             cur.execute("ALTER TABLE Users ADD COLUMN name TEXT NOT NULL DEFAULT 'n/a'")
         except sqlite3.OperationalError:
             pass
+
+        """SERVER SETTINGS"""
+        cur.execute('''
+            SELECT * FROM settings
+        ''')
+        r = cur.fetchall()
+        if r:
+            for key, val in r:
+                settings[key] = json.loads(val)
     db.close()
+
+
 
 """UUID UPDATE"""
 
@@ -35,7 +57,10 @@ def update_name_by_uuid(uuid, name):
     db = sqlite3.connect("subserver.db")
     with db:
         cur = db.cursor()
-        cur.execute("UPDATE Users SET name = ? WHERE uuid = ?", (name, uuid))
+        cur.execute("INSERT OR REPLACE INTO Users (uuid, name, max_device, hwid) VALUES (?, ?, ?, ?)"
+                    "ON CONFLICT(uuid) DO UPDATE SET name = excluded.name"
+                    ,
+                    (uuid, name, def_size, json.dumps([])))
     db.close()
 
 def get_all_uuid():
@@ -47,6 +72,16 @@ def get_all_uuid():
     db.close()
     return rows
 
+def update_settings():
+    db = sqlite3.connect("subserver.db")
+    with db:
+        cur = db.cursor()
+        sett = [(key,json.dumps(val)) for key, val in settings.items()]
+        cur.executemany('''
+            INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)
+        ''', sett)
+        db.commit()
+    db.close()
 
 """SAVE AND LOAD DATA"""
 
@@ -78,14 +113,10 @@ def update_device_data_by(usr:classes.user):
         with db:
             cur = db.cursor()
             cur.execute('''
-            UPDATE Users SET hwid = ? WHERE uuid = ?
-            ''', (json.dumps(current_devices), uuid))
+            UPDATE Users SET hwid = ? WHERE uuid = ? OR name = ?
+            ''', (json.dumps(current_devices), uuid, uuid))
             if cur.rowcount == 0:
-                cur.execute('''
-                            UPDATE Users SET hwid = ? WHERE name = ?
-                            ''', (json.dumps(current_devices), uuid))
-                if cur.rowcount == 0:
-                    warnings.warn("No data has been updated")
+                warnings.warn("No data has been updated")
     finally:
         db.close()
 
@@ -97,14 +128,10 @@ def update_max_device_data_by(usr:classes.user):
         with db:
             cur = db.cursor()
             cur.execute('''
-            UPDATE Users SET max_device = ? WHERE uuid = ?
-            ''', (current_max_devices, uuid))
+            UPDATE Users SET max_device = ? WHERE uuid = ? OR name = ?
+            ''', (current_max_devices, uuid, uuid))
             if cur.rowcount == 0:
-                cur.execute('''
-                            UPDATE Users SET max_device = ? WHERE name = ?
-                            ''', (current_max_devices, uuid))
-                if cur.rowcount == 0:
-                    warnings.warn("No data has been updated")
+                warnings.warn("No data has been updated")
     finally:
         db.close()
 
@@ -114,16 +141,11 @@ def get_data_by(uuid_name):
         with db:
             cur = db.cursor()
             cur.execute('''
-            SELECT uuid, max_device, hwid, name FROM Users WHERE uuid = ?
-            ''', (uuid_name,))
+            SELECT uuid, max_device, hwid, name FROM Users WHERE uuid = ? OR name = ?
+            ''', (uuid_name, uuid_name))
             res = cur.fetchone()
             if not res:
-                cur.execute('''
-                            SELECT uuid, max_device, hwid, name FROM Users WHERE name = ?
-                            ''', (uuid_name,))
-                res = cur.fetchone()
-                if not res:
-                    return classes.user(def_size, 'n/a',[], 'n/a')
+                return classes.user(uuid_name, 'n/a',   def_size, 'n/a')
             uuid, mx_device, hwid, name = res
             hwid = json.loads(hwid)
             return classes.user(uuid, name, mx_device, hwid)
@@ -161,7 +183,7 @@ async def clear_trash_loop():
     await asyncio.sleep(5)
     while True:
         try:
-            users = await xui_connection.get_users_uuid_names()
+            users = await xui_connection.get_users_()
             users = set(users.keys())
             db = sqlite3.connect("subserver.db")
             try:
