@@ -27,16 +27,16 @@ async def start(message: Message):
         await message.answer("Нет доступа.")
         return
     await message.answer("Команды:\n"
-                         "/info - информация о пользователе\n"
-                         "/setlimit - установить максимальное количество устройств по uuid\n"
-                         "/clear uuid - очистить список hwid\n"
-                         "/allinfo - информация о всех подключениях\n"
-                         "/backup - бэкап базы данных\n"
-                         "/restset <1, 2, 3...> - задать подключения с ограниченим\n"
-                         "/restadd <number> - добавить подключение с огруничением\n"
-                         "/restshow - показать подключения с ограничениями\n"
-                         "/setgb <number> задать базовое ограничение гб\n"
-
+                         "<code>/info</code> - информация о пользователе\n"
+                         "<code>/setlimit</code> - установить максимальное количество устройств по uuid\n"
+                         "<code>/clear</code> uuid - очистить список hwid\n"
+                         "<code>/allinfo</code> - информация о всех подключениях\n"
+                         "<code>/backup</code> - бэкап базы данных\n"
+                         "<code>/restset</code> &lt;1, 2, 3...&gt; - задать подключения с ограниченим\n"
+                         "<code>/restadd</code> &lt;number&gt; - добавить подключение с огруничением\n"
+                         "<code>/restshow</code> - показать подключения с ограничениями\n"
+                         "<code>/setgb</code> &lt;number&gt; задать базовое ограничение гб\n",
+                         parse_mode="HTML"
                          )
 
 @dp.message(Command("info"))
@@ -112,7 +112,7 @@ async def restset(message: Message, command: CommandObject):
     inbounds = command.args.strip().replace(' ', '').split(",")
     settings['restricted_inbounds'] = inbounds
     db_driver.update_settings()
-    await message.answer(f"Найстройки изменены. Ограничения действуют для следующих id подключений: {", ".join(inbounds)}",
+    await message.answer(f"Найстройки изменены. Ограничения действуют для следующих id подключений: {', '.join(inbounds)}",
                          parse_mode="HTML")
 
 
@@ -121,7 +121,7 @@ async def restshow(message: Message, command: CommandObject):
     if not is_admin(message.from_user.id):
         return
     await message.answer(f"Ограничения действуют для следующих id подключений: "
-                         f"{", ".join(settings['restricted_inbounds'])}",
+                         f"{', '.join(settings['restricted_inbounds'])}",
                          parse_mode="HTML")
 
 @dp.message(Command("restadd"))
@@ -137,7 +137,7 @@ async def restadd(message: Message, command: CommandObject):
             settings['restricted_inbounds'].append(i)
     db_driver.update_settings()
     await message.answer(f"Найстройки изменены. Ограничения действуют для следующих id подключений: "
-                         f"{", ".join(settings['restricted_inbounds'])}",
+                         f"{', '.join(settings['restricted_inbounds'])}",
                          parse_mode="HTML")
 
 @dp.message(Command("setgbdef"))
@@ -156,7 +156,7 @@ async def setgb(message: Message, command: CommandObject):
     settings["base_gb"] = gb * 1024**3
     db_driver.update_settings()
     await message.answer(f"Найстройки изменены. Ограничения действуют для следующих id подключений: "
-                         f"{", ".join(settings['restricted_inbounds'])}",
+                         f"{', '.join(settings['restricted_inbounds'])}",
                          parse_mode="HTML")
 
 def get_info(uuid):
