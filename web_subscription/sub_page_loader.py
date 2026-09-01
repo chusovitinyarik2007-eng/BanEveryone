@@ -24,7 +24,7 @@ async def send_sub_page(request: Request, vpn_name, uuid):
         total = round(int(data_rest.get('obj', {})
                .get('client', {})
                .get("totalGB", 0)) / 1024 ** 3, 2)
-        used = round(data_rest.get("usedTraffic", 0), 2)
+        used = round(data_rest.get('obj', {}).get("usedTraffic", 0), 2)
     total = "∞" if total == 0 else total
     expiry_time_ms = data["expiryTime"]
     expiry_timestamp = expiry_time_ms / 1000

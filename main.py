@@ -66,7 +66,7 @@ async def get_sub(request: Request):
     mx_devices = user.max_device
     hwids = user.current_device
     userinfo = await xui_connection.get_user_info(name + "--rest")
-    used_gb = userinfo.get('usedTraffic', 0)
+    used_gb = userinfo.get('obj', {}).get('usedTraffic', 0)
     totalgb = (userinfo.get('obj', {})
                .get('client', {})
                .get("totalGB", 0))
