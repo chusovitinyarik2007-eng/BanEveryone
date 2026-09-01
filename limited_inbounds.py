@@ -45,7 +45,7 @@ async def user_check_inbounds_rest():
                 print(f"(remove extra) Failed to get inbound for {inb}")
                 warnings.warn(f"Failed to get inbound for {inb}")
                 continue
-            warnings.warn(f"(remove extra) TOTAL CLIENTS: {len(inbound["obj"]["settings"]["clients"])}")
+            #warnings.warn(f"(remove extra) TOTAL CLIENTS:" + len(inbound["obj"]["settings"]["clients"])})
             index = 0
             while len(inbound["obj"]["settings"]["clients"]) > index:
                 user = inbound["obj"]["settings"]["clients"][index]
