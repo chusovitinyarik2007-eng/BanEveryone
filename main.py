@@ -11,7 +11,6 @@ import uvicorn
 from web_subscription.sub_page_loader import *
 from backup_db import backup_schedule
 from classes import settings
-import tgbot
 from limited_inbounds import user_check_inbounds_rest, update_users_rest
 
 app = FastAPI()
@@ -45,6 +44,7 @@ UNCNOWN_DEVICE_BODY = base64.b64encode(UNCNOWN_DEVICE_LINK.encode()).decode()
 
 @app.api_route("/"+settings["sub"]+"/{uuid}", methods=["GET", "POST"])
 async def get_sub(request: Request):
+    import tgbot
     import xui_connection
     uuid = str(request.url).split('/')[-1]
     if is_browser(request):
@@ -120,6 +120,7 @@ def get_header_ci(headers, name: str) -> str:
 
 
 async def fetch_real_sub(sub_id: str, request: Request, mx, cur, total_gb, remain_gb) -> Response:
+    import tgbot
     url = settings["XUI_SUB_URL"].format(sub_id=sub_id)
 
     forward_headers = {}
@@ -218,6 +219,7 @@ def is_browser(request: Request) -> bool:
     return False
 
 async def run_bot():
+    import tgbot
     while True:
         try:
             await tgbot.dp.start_polling(tgbot.bot)
@@ -229,6 +231,7 @@ async def run_bot():
 
 async def main():
     import xui_connection
+    import tgbot
     await xui_connection.sync_names_with_panel()
 
     config = uvicorn.Config(app, host="127.0.0.1", port=settings["start_at"], log_level="info")
