@@ -1,6 +1,8 @@
 from starlette.staticfiles import StaticFiles
 
 import db_driver
+import xui_connection
+
 db_driver.init_db()
 
 import asyncio
@@ -12,7 +14,6 @@ from web_subscription.sub_page_loader import *
 from backup_db import backup_schedule
 from classes import settings
 import tgbot
-from xui_connection import sync_names_with_panel
 from limited_inbounds import user_check_inbounds_rest, update_users_rest
 
 app = FastAPI()
@@ -229,7 +230,7 @@ async def run_bot():
             await asyncio.sleep(5)
 
 async def main():
-    await sync_names_with_panel()
+    await xui_connection.sync_names_with_panel()
 
     config = uvicorn.Config(app, host="127.0.0.1", port=settings["start_at"], log_level="info")
     server = uvicorn.Server(config)

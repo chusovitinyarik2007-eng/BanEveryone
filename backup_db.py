@@ -1,6 +1,5 @@
 import shutil
 from aiogram.types import FSInputFile
-import tgbot
 from datetime import datetime, timedelta
 import asyncio
 from datetime import datetime
@@ -8,6 +7,7 @@ import os
 from classes import settings
 
 async def backup_db():
+    import tgbot
     if not os.path.isfile(settings["DB_PATH"]):
         await tgbot.setmsg_admin("Ошибка бэкапа - файл базы не найден")
         return
@@ -35,6 +35,7 @@ def seconds_until_midnight() -> float:
     return (nxt - now).total_seconds()
 
 async def backup_schedule():
+    import tgbot
     await asyncio.sleep(5)
     while True:
         wait = seconds_until_midnight()
