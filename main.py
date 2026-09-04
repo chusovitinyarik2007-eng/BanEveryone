@@ -1,4 +1,5 @@
 import db_driver
+db_driver.init_db()
 from starlette.staticfiles import StaticFiles
 from classes import settings
 import asyncio

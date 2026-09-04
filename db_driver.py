@@ -40,6 +40,7 @@ def init_db():
         if r:
             for key, val in r:
                 settings[key] = json.loads(val)
+        warnings.warn(f"DB INIT: \n{settings}")
     db.close()
 
 
@@ -195,5 +196,3 @@ async def clear_trash_loop():
             warnings.warn(f"Error while clearing trash loop: {e}")
 
         await asyncio.sleep(settings["CLEAR_TRASH"] * 60)
-
-init_db()
