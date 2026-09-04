@@ -1,14 +1,12 @@
-from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import HTMLResponse
 from starlette.requests import Request
 import db_driver
-import xui_connection
 from datetime import datetime
 
 templates = Jinja2Templates(directory="web_subscription/templates")
 
 async def send_sub_page(request: Request, vpn_name, uuid):
+    import xui_connection
     user = db_driver.get_data_by(uuid)
     hwids = user.current_device
     mx = user.max_device
