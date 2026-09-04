@@ -1,7 +1,6 @@
 from starlette.staticfiles import StaticFiles
 
 import db_driver
-db_driver.init_db()
 
 import asyncio
 import base64
@@ -230,6 +229,7 @@ async def run_bot():
             await asyncio.sleep(5)
 
 async def main():
+    db_driver.init_db()
     import xui_connection
     import tgbot
     await xui_connection.sync_names_with_panel()
