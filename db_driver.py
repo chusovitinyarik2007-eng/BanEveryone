@@ -196,3 +196,4 @@ async def clear_trash_loop():
 
         await asyncio.sleep(settings["CLEAR_TRASH"] * 60)
 
+init_db()
