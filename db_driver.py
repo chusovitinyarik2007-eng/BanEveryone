@@ -4,7 +4,6 @@ import json
 import warnings
 from classes import def_sett, settings
 import classes
-import xui_connection
 
 def init_db():
     db = sqlite3.connect("subserver.db")
@@ -45,6 +44,7 @@ def init_db():
 
 
 
+import xui_connection
 """UUID UPDATE"""
 
 def update_name_by_uuid(uuid, name):
