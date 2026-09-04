@@ -7,7 +7,7 @@ import db_driver
 
 async def get_user_info(name):
     headers = {
-        "Authorization": f"Bearer {settings["XUI_TOKEN"]}",
+        "Authorization": f"Bearer {settings['XUI_TOKEN']}",
         "Accept": "application/json",
     }
     try:
