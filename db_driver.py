@@ -44,7 +44,6 @@ def init_db():
 
 
 
-import xui_connection
 """UUID UPDATE"""
 
 def update_name_by_uuid(uuid, name):
@@ -177,6 +176,7 @@ async def clear_trash_loop():
     await asyncio.sleep(5)
     while True:
         try:
+            import xui_connection
             users = await xui_connection.get_users_()
             users = set(users.keys())
             db = sqlite3.connect("subserver.db")
