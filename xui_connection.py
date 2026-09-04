@@ -12,7 +12,7 @@ async def get_user_info(name):
     }
     try:
         async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
-            r = await client.get(f"{settings["XUI_BASE"]}/panel/api/clients/get/{name}", headers=headers)
+            r = await client.get(f"{settings['XUI_BASE']}/panel/api/clients/get/{name}", headers=headers)
             print("inbounds", r.status_code, r.text[:200])
             r.raise_for_status()
             data = r.json()
@@ -30,7 +30,7 @@ async def get_users_(onlu_uuid_names = True) -> list | set:
         "Accept": "application/json",
     }
     async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
-        r = await client.get(f"{settings["XUI_BASE"]}/panel/api/inbounds/list", headers=headers)
+        r = await client.get(f"{settings['XUI_BASE']}/panel/api/inbounds/list", headers=headers)
         print("inbounds", r.status_code, r.text)
         r.raise_for_status()
         data = r.json()
@@ -89,7 +89,7 @@ async def get_inbound(id):
         "Accept": "application/json",
     }
     async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
-        r = await client.get(f"{settings["XUI_BASE"]}/panel/api/inbounds/get/{id}", headers=headers)
+        r = await client.get(f"{settings['XUI_BASE']}/panel/api/inbounds/get/{id}", headers=headers)
         print(f"inbound {id} --> ", r.status_code, r.text)
         r.raise_for_status()
         if r.status_code == 200:
@@ -105,7 +105,7 @@ async def update_inbound(id, data):
         "Accept": "application/json",
     }
     async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
-        r = await client.post(f"{settings["XUI_BASE"]}/panel/api/inbounds/update/{id}", headers=headers, json=data)
+        r = await client.post(f"{settings['XUI_BASE']}/panel/api/inbounds/update/{id}", headers=headers, json=data)
         r.raise_for_status()
         if r.status_code != 200:
             warnings.warn(f"Failed to update inbound {id}, error: {r.status_code}")
@@ -121,7 +121,7 @@ async def update_user(email, data):
         "Accept": "application/json",
     }
     async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
-        r = await client.post(f"{settings["XUI_BASE"]}/panel/api/clients/update/{email}", headers=headers, json=data)
+        r = await client.post(f"{settings['XUI_BASE']}/panel/api/clients/update/{email}", headers=headers, json=data)
         r.raise_for_status()
         if r.status_code != 200:
             warnings.warn(f"Failed to update user {email}, error: {r.status_code}, \nText error: {r.text}")
