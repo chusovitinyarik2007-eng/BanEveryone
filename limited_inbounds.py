@@ -1,9 +1,9 @@
 import asyncio
 import warnings
-import xui_connection
 
 from classes import settings
 async def user_check_inbounds_rest():
+    import xui_connection
     while True:
         users = await xui_connection.get_users_(False)
         what_to_remove = {}
@@ -49,6 +49,7 @@ async def user_check_inbounds_rest():
         await asyncio.sleep(settings['update_users_interval'] * 60)
 
 async def update_users_rest():
+    import xui_connection
     await asyncio.sleep(5)
     while True:
         users = await xui_connection.get_users_(False)
