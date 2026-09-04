@@ -26,7 +26,7 @@ async def get_user_info(name):
 async def get_users_(onlu_uuid_names = True) -> list | set:
     users = {}
     headers = {
-        "Authorization": f"Bearer {settings["XUI_TOKEN"]}",
+        "Authorization": f"Bearer {settings['XUI_TOKEN']}",
         "Accept": "application/json",
     }
     async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
@@ -85,7 +85,7 @@ async def sync_names_with_panel(uuid = None):
 
 async def get_inbound(id):
     headers = {
-        "Authorization": f"Bearer {settings["XUI_TOKEN"]}",
+        "Authorization": f"Bearer {settings['XUI_TOKEN']}",
         "Accept": "application/json",
     }
     async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
@@ -101,7 +101,7 @@ async def get_inbound(id):
 
 async def update_inbound(id, data):
     headers = {
-        "Authorization": f"Bearer {settings["XUI_TOKEN"]}",
+        "Authorization": f"Bearer {settings['XUI_TOKEN']}",
         "Accept": "application/json",
     }
     async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
@@ -117,7 +117,7 @@ async def update_inbound(id, data):
 
 async def update_user(email, data):
     headers = {
-        "Authorization": f"Bearer {settings["XUI_TOKEN"]}",
+        "Authorization": f"Bearer {settings['XUI_TOKEN']}",
         "Accept": "application/json",
     }
     async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
