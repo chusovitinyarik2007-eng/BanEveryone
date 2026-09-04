@@ -1,7 +1,5 @@
 from starlette.staticfiles import StaticFiles
-
-import db_driver
-
+from classes import settings
 import asyncio
 import base64
 import httpx
@@ -9,7 +7,7 @@ from fastapi import FastAPI, Request, Response
 import uvicorn
 from web_subscription.sub_page_loader import *
 from backup_db import backup_schedule
-from classes import settings
+
 from limited_inbounds import user_check_inbounds_rest, update_users_rest
 
 app = FastAPI()
@@ -229,7 +227,6 @@ async def run_bot():
             await asyncio.sleep(5)
 
 async def main():
-    db_driver.init_db()
     import xui_connection
     import tgbot
     await xui_connection.sync_names_with_panel()

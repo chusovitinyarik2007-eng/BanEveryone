@@ -1,5 +1,7 @@
 import os
 from dotenv import load_dotenv
+import db_driver
+db_driver.init_db()
 
 load_dotenv()
 DB_PATH = os.getenv("DB_PATH", "/opt/BanEveryone/subserver.db")
