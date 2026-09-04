@@ -1,3 +1,5 @@
+from starlette.staticfiles import StaticFiles
+
 import db_driver
 db_driver.init_db()
 
@@ -7,7 +9,6 @@ import httpx
 from fastapi import FastAPI, Request, Response
 import uvicorn
 from web_subscription.sub_page_loader import *
-import xui_connection
 from backup_db import backup_schedule
 from classes import settings
 import tgbot
@@ -45,6 +46,7 @@ UNCNOWN_DEVICE_BODY = base64.b64encode(UNCNOWN_DEVICE_LINK.encode()).decode()
 
 @app.api_route("/"+settings["sub"]+"/{uuid}", methods=["GET", "POST"])
 async def get_sub(request: Request):
+    import xui_connection
     uuid = str(request.url).split('/')[-1]
     if is_browser(request):
         return await send_sub_page(request, settings["vpn_name"], uuid)
