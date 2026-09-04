@@ -1,28 +1,21 @@
+import db_driver
+db_driver.init_db()
+
 import asyncio
 import base64
-import os
 import httpx
-from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response
 import uvicorn
 from web_subscription.sub_page_loader import *
 import xui_connection
 from backup_db import backup_schedule
-import backup_db
-import classes
-import db_driver
+from classes import settings
 import tgbot
 from xui_connection import sync_names_with_panel
 from limited_inbounds import user_check_inbounds_rest, update_users_rest
 
-load_dotenv()
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="web_subscription/static"), name="static")
-sub = os.getenv("SUB", "sub")
-XUI_SUB_URL = os.getenv("URL")
-vpn_name = os.getenv("VPN", "Сосиски VPN")
-start_at = int(os.getenv("PORTSERVER", 3322))
-whiteList = os.getenv("WHITELIST", "").split(",")
 
 DENIED_LINK = (
     "vless://00000000-0000-0000-0000-000000000001@127.0.0.1:443"
@@ -50,11 +43,11 @@ DENIED_BODY = base64.b64encode(DENIED_LINK.encode()).decode()
 UNCNOWN_BODY = base64.b64encode(UNCNOWN_LINK.encode()).decode()
 UNCNOWN_DEVICE_BODY = base64.b64encode(UNCNOWN_DEVICE_LINK.encode()).decode()
 
-@app.api_route("/"+sub+"/{uuid}", methods=["GET", "POST"])
+@app.api_route("/"+settings["sub"]+"/{uuid}", methods=["GET", "POST"])
 async def get_sub(request: Request):
     uuid = str(request.url).split('/')[-1]
     if is_browser(request):
-        return await send_sub_page(request, vpn_name, uuid)
+        return await send_sub_page(request, settings["vpn_name"], uuid)
 
     if not db_driver.is_user_exist(uuid):
         r = await xui_connection.sync_names_with_panel(uuid)
@@ -70,7 +63,7 @@ async def get_sub(request: Request):
     totalgb = (userinfo.get('obj', {})
                .get('client', {})
                .get("totalGB", 0))
-    if uuid in whiteList:
+    if uuid in settings["whitelist"]:
         return await fetch_real_sub(uuid, request, 1, 100000)
     hwid = request.headers.get('x-hwid') or request.headers.get("X-HWID")
     if not hwid:
@@ -126,7 +119,7 @@ def get_header_ci(headers, name: str) -> str:
 
 
 async def fetch_real_sub(sub_id: str, request: Request, mx, cur, total_gb, remain_gb) -> Response:
-    url = XUI_SUB_URL.format(sub_id=sub_id)
+    url = settings["XUI_SUB_URL"].format(sub_id=sub_id)
 
     forward_headers = {}
     for h in ("user-agent", "accept", "accept-language"):
@@ -191,7 +184,7 @@ async def fetch_real_sub(sub_id: str, request: Request, mx, cur, total_gb, remai
 def make_denied_response(info) -> Response:
     headers = {
         "Content-Type": "text/plain; charset=utf-8",
-        "Profile-Title": "base64:" + base64.b64encode(vpn_name.encode()).decode(),
+        "Profile-Title": "base64:" + base64.b64encode(settings["vpn_name"].encode()).decode(),
         "Profile-Update-Interval": "1",
         "Subscription-Userinfo": "upload=0; download=0; total=1; expire=0",
     }
@@ -234,10 +227,9 @@ async def run_bot():
             await asyncio.sleep(5)
 
 async def main():
-    db_driver.init_db()
     await sync_names_with_panel()
 
-    config = uvicorn.Config(app, host="127.0.0.1", port=start_at, log_level="info")
+    config = uvicorn.Config(app, host="127.0.0.1", port=settings["start_at"], log_level="info")
     server = uvicorn.Server(config)
 
     bot_task = asyncio.create_task(run_bot())

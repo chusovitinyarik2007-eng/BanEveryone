@@ -49,7 +49,7 @@ async def send_sub_page(request: Request, vpn_name, uuid):
             "current_usage_traffic" : current_traffic,
             "total_traffic" : total_traffic if total_traffic > 0 else "∞",
             "is_active" : isactive,
-            "additional_gb" : f"БС {used} из {total} ГБ."
+            "additional_gb" : f"БС {used} из {total} ГБ." if data_rest else "",
         },
     )
 

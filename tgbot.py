@@ -6,6 +6,8 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiohttp_socks import ProxyConnector
+
+import xui_connection
 from classes import settings
 import db_driver
 load_dotenv()
@@ -48,6 +50,7 @@ async def info(message: Message, command: Command):
         await message.answer("Использование: /info <uuid> or <name>")
         return
     uuid = command.args.strip()
+    await xui_connection.sync_names_with_panel()
     await message.answer(f"Информация о пользователе:\n{get_info(uuid)}", parse_mode="HTML")
 
 @dp.message(Command("setlimit"))
@@ -60,6 +63,7 @@ async def setlimit(message: Message, command: CommandObject):
         return
 
     parts = command.args.strip().split()
+    await xui_connection.sync_names_with_panel()
     if len(parts) != 2:
         await message.answer("Использование: /setlimit <uuid> <max_hwid>")
         return
@@ -76,6 +80,7 @@ async def clear(message: Message, command: CommandObject):
         await message.answer("Использование: /clear <uuid>")
         return
     uuid= command.args.strip()
+    await xui_connection.sync_names_with_panel()
     db_driver.update_device_data_by(classes.user(uuid = uuid))
 
     await message.answer(f"Изменено:\n{get_info(uuid)}", parse_mode="HTML")
@@ -92,6 +97,7 @@ async def allinfo(message: Message, command: CommandObject):
         mx = int(mx)
     except Exception:
         await message.answer("Ошибка ввода")
+    await xui_connection.sync_names_with_panel()
     r = db_driver.find_all_less(mx)
     await message.answer(f"Все записи меньше {mx}:" + "\n" + r, parse_mode="HTML")
 

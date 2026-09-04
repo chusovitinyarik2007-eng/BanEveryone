@@ -1,16 +1,10 @@
 import asyncio
-import os
 import sqlite3
 import json
 import warnings
-from dotenv import load_dotenv
 from classes import def_sett, settings
 import classes
 import xui_connection
-
-load_dotenv()
-def_size = int(os.getenv("def_size", "50"))
-clear_trash = int(os.getenv("CLEAR_TRASH_EVERY_MIN", "60"))
 
 def init_db():
     db = sqlite3.connect("subserver.db")
@@ -60,7 +54,7 @@ def update_name_by_uuid(uuid, name):
         cur.execute("INSERT OR REPLACE INTO Users (uuid, name, max_device, hwid) VALUES (?, ?, ?, ?)"
                     "ON CONFLICT(uuid) DO UPDATE SET name = excluded.name"
                     ,
-                    (uuid, name, def_size, json.dumps([])))
+                    (uuid, name, settings["DEF_SIZE"], json.dumps([])))
     db.close()
 
 def get_all_uuid():
@@ -145,7 +139,7 @@ def get_data_by(uuid_name):
             ''', (uuid_name, uuid_name))
             res = cur.fetchone()
             if not res:
-                return classes.user(uuid_name, 'n/a',   def_size, 'n/a')
+                return classes.user(uuid_name, 'n/a',   settings["DEF_SIZE"], [])
             uuid, mx_device, hwid, name = res
             hwid = json.loads(hwid)
             return classes.user(uuid, name, mx_device, hwid)
@@ -200,5 +194,5 @@ async def clear_trash_loop():
         except Exception as e:
             warnings.warn(f"Error while clearing trash loop: {e}")
 
-        await asyncio.sleep(clear_trash * 60)
+        await asyncio.sleep(settings["CLEAR_TRASH"] * 60)
 

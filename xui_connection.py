@@ -1,25 +1,18 @@
 import http
 import json
 import warnings
-
 import httpx
-
+from classes import settings
 import db_driver
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
-XUI_BASE = os.getenv("XUI_BASE", "").rstrip("/")
-XUI_TOKEN = os.getenv("XUI_TOKEN", "")
 
 async def get_user_info(name):
     headers = {
-        "Authorization": f"Bearer {XUI_TOKEN}",
+        "Authorization": f"Bearer {settings["XUI_TOKEN"]}",
         "Accept": "application/json",
     }
     try:
         async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
-            r = await client.get(f"{XUI_BASE}/panel/api/clients/get/{name}", headers=headers)
+            r = await client.get(f"{settings["XUI_BASE"]}/panel/api/clients/get/{name}", headers=headers)
             print("inbounds", r.status_code, r.text[:200])
             r.raise_for_status()
             data = r.json()
@@ -33,11 +26,11 @@ async def get_user_info(name):
 async def get_users_(onlu_uuid_names = True) -> list | set:
     users = {}
     headers = {
-        "Authorization": f"Bearer {XUI_TOKEN}",
+        "Authorization": f"Bearer {settings["XUI_TOKEN"]}",
         "Accept": "application/json",
     }
     async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
-        r = await client.get(f"{XUI_BASE}/panel/api/inbounds/list", headers=headers)
+        r = await client.get(f"{settings["XUI_BASE"]}/panel/api/inbounds/list", headers=headers)
         print("inbounds", r.status_code, r.text)
         r.raise_for_status()
         data = r.json()
@@ -77,8 +70,12 @@ async def sync_names_with_panel(uuid = None):
     all_users = await get_users_()
     for usr in currnt_users:
         name = all_users.get(usr, "n/a")
+        if name.endswith("--rest"):
+            continue
         db_driver.update_name_by_uuid(usr, name)
     for sub_id, email in all_users.items():
+        if email.endswith("--rest"):
+            continue
         db_driver.update_name_by_uuid(sub_id, email)
         if uuid == sub_id:
             return True
@@ -88,11 +85,11 @@ async def sync_names_with_panel(uuid = None):
 
 async def get_inbound(id):
     headers = {
-        "Authorization": f"Bearer {XUI_TOKEN}",
+        "Authorization": f"Bearer {settings["XUI_TOKEN"]}",
         "Accept": "application/json",
     }
     async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
-        r = await client.get(f"{XUI_BASE}/panel/api/inbounds/get/{id}", headers=headers)
+        r = await client.get(f"{settings["XUI_BASE"]}/panel/api/inbounds/get/{id}", headers=headers)
         print(f"inbound {id} --> ", r.status_code, r.text)
         r.raise_for_status()
         if r.status_code == 200:
@@ -104,11 +101,11 @@ async def get_inbound(id):
 
 async def update_inbound(id, data):
     headers = {
-        "Authorization": f"Bearer {XUI_TOKEN}",
+        "Authorization": f"Bearer {settings["XUI_TOKEN"]}",
         "Accept": "application/json",
     }
     async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
-        r = await client.post(f"{XUI_BASE}/panel/api/inbounds/update/{id}", headers=headers, json=data)
+        r = await client.post(f"{settings["XUI_BASE"]}/panel/api/inbounds/update/{id}", headers=headers, json=data)
         r.raise_for_status()
         if r.status_code != 200:
             warnings.warn(f"Failed to update inbound {id}, error: {r.status_code}")
@@ -120,11 +117,11 @@ async def update_inbound(id, data):
 
 async def update_user(email, data):
     headers = {
-        "Authorization": f"Bearer {XUI_TOKEN}",
+        "Authorization": f"Bearer {settings["XUI_TOKEN"]}",
         "Accept": "application/json",
     }
     async with httpx.AsyncClient(verify=False, timeout=20.0) as client:
-        r = await client.post(f"{XUI_BASE}/panel/api/clients/update/{email}", headers=headers, json=data)
+        r = await client.post(f"{settings["XUI_BASE"]}/panel/api/clients/update/{email}", headers=headers, json=data)
         r.raise_for_status()
         if r.status_code != 200:
             warnings.warn(f"Failed to update user {email}, error: {r.status_code}, \nText error: {r.text}")
