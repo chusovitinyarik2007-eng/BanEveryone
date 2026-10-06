@@ -23,7 +23,7 @@ async def get_user_info(name):
     except Exception as e:
         return {}
 
-async def get_users_(onlu_uuid_names = True) -> list | set:
+async def get_users_(onlu_uuid_names = True, update_tg_id = False) -> list | set:
     users = {}
     headers = {
         "Authorization": f"Bearer {settings['XUI_TOKEN']}",
@@ -61,22 +61,24 @@ async def get_users_(onlu_uuid_names = True) -> list | set:
         for cl in sett.get('clients') or []:
             uuid = (cl.get('subId') or "").strip()
             name = (cl.get('email') or "").strip()
+            tg_id = cl.get('tgId')
             if uuid:
-                users[uuid] = name or 'n/a'
+                users[uuid] = (name or 'n/a', tg_id) if update_tg_id else name or 'n/a'
     return users
 
 async def sync_names_with_panel(uuid = None):
     currnt_users = db_driver.get_all_uuid()
-    all_users = await get_users_()
+    all_users = await get_users_(update_tg_id=True)
     for usr in currnt_users:
-        name = all_users.get(usr, "n/a")
+        name, tg_id = all_users.get(usr, "n/a")
         if name.endswith("--rest"):
             continue
-        db_driver.update_name_by_uuid(usr, name)
-    for sub_id, email in all_users.items():
+        db_driver.update_name_by_uuid(usr, name, tg_id)
+    for sub_id, usr in all_users.items():
+        email, tg_id = usr
         if email.endswith("--rest"):
             continue
-        db_driver.update_name_by_uuid(sub_id, email)
+        db_driver.update_name_by_uuid(sub_id, email, tg_id)
         if uuid == sub_id:
             return True
     print("Successfully sync names with panel")

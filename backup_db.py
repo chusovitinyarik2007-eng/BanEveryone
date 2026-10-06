@@ -9,7 +9,7 @@ from classes import settings
 async def backup_db():
     import tgbot
     if not os.path.isfile(settings["DB_PATH"]):
-        await tgbot.setmsg_admin("Ошибка бэкапа - файл базы не найден")
+        await tgbot.sendmsg_admin("Ошибка бэкапа - файл базы не найден")
         return
     tmp = None
     try:
@@ -23,7 +23,7 @@ async def backup_db():
             caption=caption,
         )
     except Exception as e:
-        await tgbot.setmsg_admin(f'Ошибка бэкапа - {e}')
+        await tgbot.sendmsg_admin(f'Ошибка бэкапа - {e}')
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
@@ -39,7 +39,7 @@ async def backup_schedule():
     await asyncio.sleep(5)
     while True:
         wait = seconds_until_midnight()
-        await tgbot.setmsg_admin(f'Next backup will be in {wait} seconds. \nAt 00:00:00\nIts {(int(wait) // 60) // 60}h, {(int(wait) // 60) % 60 }m, '
+        await tgbot.sendmsg_admin(f'Next backup will be in {wait} seconds. \nAt 00:00:00\nIts {(int(wait) // 60) // 60}h, {(int(wait) // 60) % 60 }m, '
                                  f'{int(wait) % 60}s.')
         await asyncio.sleep(wait)
         try:

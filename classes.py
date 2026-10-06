@@ -12,13 +12,15 @@ start_at = int(os.getenv("PORTSERVER", 3322))
 whiteList = os.getenv("WHITELIST", "").split(",")
 XUI_BASE = os.getenv("XUI_BASE", "").rstrip("/")
 XUI_TOKEN = os.getenv("XUI_TOKEN", "")
+host = os.getenv("HOST", "main.service-ya.fun")
 
 class user:
-    def __init__(self, uuid='n/a', name='n/a', max_device='n/a', current_device=[]):
+    def __init__(self, uuid='n/a', name='n/a', max_device='n/a', current_device=[], tg_id = 0):
         self.uuid = uuid
         self.name = name
         self.max_device = max_device
         self.current_device = current_device
+        self.tg_id = tg_id
 
     @property
     def __str__(self):
@@ -35,6 +37,10 @@ def_sett = {
     "DB_PATH" : DB_PATH,
     "DEF_SIZE" : def_size,
     "CLEAR_TRASH" : clear_trash,
+    "cost_per_month" : 200,
+    "alert_days" : [1, 3]
+}
+most_important = {
     "sub" : sub,
     "XUI_SUB_URL" : XUI_SUB_URL,
     "vpn_name" : vpn_name,
@@ -42,7 +48,26 @@ def_sett = {
     "whitelist" : whiteList,
     "XUI_BASE" : XUI_BASE,
     "XUI_TOKEN" : XUI_TOKEN,
+    "HOST" : host,
 }
+
 
 def convert_to_user(uuid, limit, hwids, name):
     return user(uuid, name, limit, hwids)
+
+
+def check_user_in_hwids(curr, userdata):
+    if not userdata:
+        return False
+    for hwid in userdata:
+        if hwid.get('hwid', "") == curr:
+            return True
+    return False
+def user_update_hwid(curr, userdata):
+    if not userdata:
+        return userdata
+    for i, hwid in enumerate(userdata):
+        if hwid['hwid'] == curr['hwid']:
+            userdata[i] = curr
+            break
+    return userdata

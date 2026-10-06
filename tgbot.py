@@ -1,15 +1,17 @@
 import os
+import shutil
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
 import classes
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 from aiogram.client.session.aiohttp import AiohttpSession
-from aiohttp_socks import ProxyConnector
-
 import xui_connection
 from classes import settings
 import db_driver
+
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 admins = list(map(int, os.getenv("ADMINS", "1234").split(',')))
@@ -19,6 +21,9 @@ use_proxy = os.getenv("USE_PROXY", "False")
 session = AiohttpSession("http://127.0.0.1:10808")
 bot = Bot(token=BOT_TOKEN, session=session) if use_proxy=='True' else Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+class UploadState(StatesGroup):
+    waiting_file = State()
 
 def is_admin(id):
     return id in admins
@@ -34,10 +39,12 @@ async def start(message: Message):
                          "<code>/clear</code> uuid - очистить список hwid\n"
                          "<code>/allinfo</code> - информация о всех подключениях\n"
                          "<code>/backup</code> - бэкап базы данных\n"
-                         "<code>/restset</code> &lt;1, 2, 3...&gt; - задать подключения с ограниченим\n"
+                         "<code>/restset</code> &lt;1, 2, 3...&gt; - задать подключения с ограничениями\n"
                          "<code>/restadd</code> &lt;number&gt; - добавить подключение с огруничением\n"
                          "<code>/restshow</code> - показать подключения с ограничениями\n"
-                         "<code>/setgb</code> &lt;number&gt; задать базовое ограничение гб\n",
+                         "<code>/setgb</code> &lt;number&gt; задать базовое ограничение гб\n"
+                         "<code>/loaddb</code> - загрузить базу данных\n"
+                         "<code>/rmdevice</code> uuid &lt;hwid1, hwid2, ...&gt;",
                          parse_mode="HTML"
                          )
 
@@ -51,7 +58,7 @@ async def info(message: Message, command: Command):
         return
     uuid = command.args.strip()
     await xui_connection.sync_names_with_panel()
-    await message.answer(f"Информация о пользователе:\n{get_info(uuid)}", parse_mode="HTML")
+    await message.answer(f"Информация о пользователе:\n{get_info(uuid, show_all_devices=True)}", parse_mode="HTML")
 
 @dp.message(Command("setlimit"))
 async def setlimit(message: Message, command: CommandObject):
@@ -84,6 +91,25 @@ async def clear(message: Message, command: CommandObject):
     db_driver.update_device_data_by(classes.user(uuid = uuid))
 
     await message.answer(f"Изменено:\n{get_info(uuid)}", parse_mode="HTML")
+
+@dp.message(Command("rmdevice"))
+async def remove_device_hwid(message: Message, command: CommandObject):
+    if not is_admin(message.from_user.id):
+        return
+    if not command.args:
+        await message.answer("Использование: /rmdevice uuid hwid1, hwid2, hwid3")
+        return
+    parts = command.args.strip().replace(',', '').split()
+    if len(parts) <2:
+        await message.answer("Использование: /rmdevice uuid hwid1, hwid2, hwid3")
+        return
+    uuid = parts[0]
+    hwid = parts[1:]
+    if db_driver.remove_hwids(uuid, hwid):
+        await message.answer(f"Изменено:\n{get_info(uuid, show_all_devices=True)}", parse_mode="HTML")
+    else:
+        await message.answer(f"Произошла ошибка обновления. Возможно, указанный uuid не найден.", parse_mode="HTML")
+
 
 @dp.message(Command("allinfo"))
 async def allinfo(message: Message, command: CommandObject):
@@ -146,7 +172,7 @@ async def restadd(message: Message, command: CommandObject):
                          f"{', '.join(settings['restricted_inbounds'])}",
                          parse_mode="HTML")
 
-@dp.message(Command("setgbdef"))
+@dp.message(Command("setgb"))
 async def setgb(message: Message, command: CommandObject):
     if not is_admin(message.from_user.id):
         return
@@ -165,17 +191,68 @@ async def setgb(message: Message, command: CommandObject):
                          f"{', '.join(settings['restricted_inbounds'])}",
                          parse_mode="HTML")
 
-def get_info(uuid):
+@dp.message(Command("loaddb"))
+async def load_database(message: Message, command: CommandObject, state: FSMContext):
+    print(1)
+    if not is_admin(message.from_user.id):
+        await message.answer("Нет доступа.")
+        return
+    await message.answer("Отправьте файл базы данных. Файл должен быть в формате .db")
+    await state.set_state(UploadState.waiting_file)
+
+@dp.message(UploadState.waiting_file, F.document)
+async def receive_and_apply(message: Message, state: FSMContext):
+    doc = message.document
+    if not doc.file_name.endswith((".db")):
+        await message.answer(
+            "Неверный формат файла. Отправьте файл базы данных SQLite (*.db)"
+        )
+        return
+    try:
+        from backup_db import backup_db
+        await message.answer("Бэкап текущей базы: ")
+        await backup_db()
+        msg_copy = await message.answer("Скачиваю файл...")
+        path = settings['DB_PATH']
+        temp_path = path + ".tmp"
+        file = await message.bot.get_file(doc.file_id)
+        await message.bot.download_file(
+            file.file_path,
+            temp_path
+        )
+        await msg_copy.edit_text("Применяю изменения...")
+        if os.path.exists(path):
+            os.remove(path)
+        shutil.move(temp_path, path)
+
+        await state.clear()
+        await msg_copy.edit_text("Изменения применены успешно.")
+    except Exception as e:
+        await msg_copy.edit_text(f"Ошибка обновления базы данных. Текст ошибки:\n{str(e)}")
+        if os.path.exists(f"{path}.tmp"):
+            os.remove(f"{path}.tmp")
+        await state.clear()
+
+
+def get_info(uuid, show_all_devices=False):
     user = db_driver.get_data_by(uuid)
     name = user.name
     mx = user.max_device
     hwds = user.current_device
     uuid = user.uuid
-
-    return (             f"UUID: <code>{uuid}</code>\n"
-                         f"Name: <code>{name}</code>\n"
-                         f"MAX_HWIDS: {mx}\n"
-                         f"CURRENT_HWIDS: {len(hwds)}")
+    if show_all_devices:
+        device_info = ""
+        for i in hwds:
+            device_info += f"<b>OS:</b> {i['device_os']}\n<b>Device:</b> {i['device_model']}\n<b>HWID:</b> <code>{i['hwid']}</code>\n\n"
+        return (f"UUID: <code>{uuid}</code>\n"
+                f"Name: <code>{name}</code>\n"
+                f"MAX_HWIDS: {mx}\n"
+                f"DEVICES - Total: {len(hwds)}\n\n{device_info}")
+    else:
+        return (f"UUID: <code>{uuid}</code>\n"
+                f"Name: <code>{name}</code>\n"
+                f"MAX_HWIDS: {mx}\n"
+                f"CURRENT_HWIDS: {len(hwds)}")
 def get_info_by_name(name):
     user = db_driver.get_data_by(name)
     uuid = user.uuid
@@ -188,5 +265,5 @@ def get_info_by_name(name):
             f"CURRENT_HWIDS: {len(hwds)}")
 
 
-async def setmsg_admin(text):
+async def sendmsg_admin(text):
     await bot.send_message(admins[0], text)

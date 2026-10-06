@@ -1,20 +1,21 @@
+import time
+import classes
 import db_driver
 db_driver.init_db()
 from starlette.staticfiles import StaticFiles
 from classes import settings
 import asyncio
-import base64
 import httpx
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Response
 import uvicorn
 from web_subscription.sub_page_loader import *
 from backup_db import backup_schedule
-
 from limited_inbounds import user_check_inbounds_rest, update_users_rest
+import base64
+import userBot.bot as userbot
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="web_subscription/static"), name="static")
-
 DENIED_LINK = (
     "vless://00000000-0000-0000-0000-000000000001@127.0.0.1:443"
     "?encryption=none&security=none&type=tcp#Подписка%20уже%20активирована\n"
@@ -34,6 +35,14 @@ UNCNOWN_DEVICE_LINK = (
     "?encryption=none&security=none&type=tcp#Обновите%20приложение\n"
     "vless://00000000-0000-0000-0000-000000000001@127.0.0.1:443"
     "?encryption=none&security=none&type=tcp#и%20подписка%20заработает\n"
+    "vless://00000000-0000-0000-0000-000000000001@127.0.0.1:443"
+    "?encryption=none&security=none&type=tcp#Поддержка->%20@yar1k_ch"
+)
+EXPIRY_DEVICE_LINK = (
+    "vless://00000000-0000-0000-0000-000000000001@127.0.0.1:443"
+    "?encryption=none&security=none&type=tcp#Подписка%20закончилась\n"
+    "vless://00000000-0000-0000-0000-000000000001@127.0.0.1:443"
+    "?encryption=none&security=none&type=tcp#Обратитесь%20к%20администратору\n"
     "vless://00000000-0000-0000-0000-000000000001@127.0.0.1:443"
     "?encryption=none&security=none&type=tcp#Поддержка->%20@yar1k_ch"
 )
@@ -57,31 +66,49 @@ async def get_sub(request: Request):
     user = db_driver.get_data_by(uuid)
     name = user.name
     mx_devices = user.max_device
-    hwids = user.current_device
-    userinfo = await xui_connection.get_user_info(name + "--rest")
-    used_gb = userinfo.get('obj', {}).get('usedTraffic', 0)
-    totalgb = (userinfo.get('obj', {})
+    device_info = user.current_device
+    userinfo = (await xui_connection.get_user_info(name)).get('obj', {})
+    userinforest = await xui_connection.get_user_info(name + "--rest")
+    used_gb = userinforest.get('obj', {}).get('usedTraffic', 0)
+    totalgb = (userinforest.get('obj', {})
                .get('client', {})
                .get("totalGB", 0))
     if uuid in settings["whitelist"]:
         return await fetch_real_sub(uuid, request, 1, 100000)
+    print(request.headers)
     hwid = request.headers.get('x-hwid') or request.headers.get("X-HWID")
+    device_os = request.headers.get('x-device-os') or request.headers.get("X-DEVICE-OS")
+    device = request.headers.get('x-device-model') or request.headers.get("X-DEVICE-MODEL")
+
     if not hwid:
-        await tgbot.setmsg_admin(f'Неопознанное устройство: {name}')
+        await tgbot.sendmsg_admin(f'Неопознанное устройство: {name}')
         return make_denied_response(UNCNOWN_DEVICE_BODY)
 
-    if mx_devices <= len(hwids) and hwid not in hwids:
-        await tgbot.setmsg_admin(f'Попытка повторного входа: {name}')
+    if mx_devices <= len(device_info) and not classes.check_user_in_hwids(hwid, device_info):
+        await tgbot.sendmsg_admin(f'Попытка повторного входа: {name}')
         return make_denied_response(DENIED_BODY)
     else:
-        if hwid in hwids:
-            return await fetch_real_sub(uuid, request, mx_devices, len(hwids), totalgb, used_gb)
-        else:
-            user.current_device.append(hwid)
-            db_driver.update_device_data_by(user)
-            return await fetch_real_sub(uuid, request, mx_devices, len(hwids), totalgb, used_gb)
+        expiry = userinfo.get('client', {}).get('expiryTime', 0)
+        if expiry > 0 and int(time.time() * 1000) > expiry  :
+            return make_denied_response(EXPIRY_DEVICE_LINK)
 
-import base64
+        if classes.check_user_in_hwids(hwid, device_info):
+            user.current_device = classes.user_update_hwid({
+                "hwid" : hwid,
+                "device_os" : device_os,
+                "device_model" : device,
+            }, device_info)
+            db_driver.update_device_data_by(user)
+            return await fetch_real_sub(uuid, request, mx_devices, len(device_info), totalgb, used_gb)
+        else:
+            user.current_device.append({
+                "hwid" : hwid,
+                "device_os" : device_os,
+                "device_model" : device,
+            })
+            db_driver.update_device_data_by(user)
+            return await fetch_real_sub(uuid, request, mx_devices, len(device_info), totalgb, used_gb)
+
 
 
 def parse_userinfo(raw: str) -> dict:
@@ -122,29 +149,50 @@ async def fetch_real_sub(sub_id: str, request: Request, mx, cur, total_gb, remai
     import tgbot
     url = settings["XUI_SUB_URL"].format(sub_id=sub_id)
 
-    forward_headers = {}
-    for h in ("user-agent", "accept", "accept-language"):
-        if h in request.headers:
-            forward_headers[h] = request.headers[h]
+    excluded_request_headers = {
+        "host",
+        "content-length",
+        "connection",
+        "keep-alive",
+        "transfer-encoding",
+    }
 
+    forward_headers = {
+        key: value
+        for key, value in request.headers.items()
+        if key.lower() not in excluded_request_headers
+    }
     async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
         try:
             resp = await client.get(
                 url,
                 headers={
                     **forward_headers,
-                    "Host": "main.service-ya.fun",
                 },
             )
         except Exception as e:
-            await tgbot.setmsg_admin(f"Error: {e}")
-            return make_denied_response(UNCNOWN_DEVICE_LINK)
+            await tgbot.sendmsg_admin(f"Error: {e}")
+            return make_denied_response(UNCNOWN_LINK)
 
     if resp.status_code != 200 or not resp.content:
-        return make_denied_response(UNCNOWN_DEVICE_LINK)
+        return make_denied_response(UNCNOWN_LINK)
+
+    excluded_headers = {
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "upgrade",
+    }
 
     out_headers = {
-        "Content-Type": resp.headers.get("content-type", "text/plain; charset=utf-8"),
+        key: value
+        for key, value in resp.headers.items()
+        if key.lower() not in excluded_headers
     }
 
     for h in (
@@ -228,12 +276,14 @@ async def run_bot():
             print("Bot error:", e)
             await asyncio.sleep(5)
 
+
+
 async def main():
     import xui_connection
     import tgbot
     await xui_connection.sync_names_with_panel()
 
-    config = uvicorn.Config(app, host="127.0.0.1", port=settings["start_at"], log_level="info")
+    config = uvicorn.Config(app, host="0.0.0.0", port=settings["start_at"], log_level="info")
     server = uvicorn.Server(config)
 
     bot_task = asyncio.create_task(run_bot())
@@ -242,6 +292,7 @@ async def main():
     trash = asyncio.create_task(db_driver.clear_trash_loop())
     users_check_inbounds_rest = asyncio.create_task(user_check_inbounds_rest())
     update_expire_user = asyncio.create_task(update_users_rest())
+    userbot_task = asyncio.create_task(userbot.run_bot())
     try:
         await server_task
     finally:
@@ -250,6 +301,7 @@ async def main():
         trash.cancel()
         users_check_inbounds_rest.cancel()
         update_expire_user.cancel()
+        userbot_task.cancel()
         for t in (bot_task, backup, trash, users_check_inbounds_rest, update_expire_user):
             try:
                 await t
