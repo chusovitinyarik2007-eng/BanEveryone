@@ -15,14 +15,13 @@ XUI_TOKEN = os.getenv("XUI_TOKEN", "")
 host = os.getenv("HOST", "main.service-ya.fun")
 
 class user:
-    def __init__(self, uuid='n/a', name='n/a', max_device='n/a', current_device=[], tg_id = 0):
+    def __init__(self, uuid='n/a', name='n/a', max_device='n/a', current_device=None, tg_id=0):
         self.uuid = uuid
         self.name = name
         self.max_device = max_device
-        self.current_device = current_device
+        self.current_device = current_device if current_device is not None else []
         self.tg_id = tg_id
 
-    @property
     def __str__(self):
         return (f'UUID: {self.uuid}\n'
                 f'Name: {self.name}\n'
@@ -37,7 +36,8 @@ def_sett = {
     "DB_PATH" : DB_PATH,
     "DEF_SIZE" : def_size,
     "CLEAR_TRASH" : clear_trash,
-    "cost_per_month" : 200,
+    "cost_per_month_full" : 200,
+    "cost_per_month_base" : 150,
     "alert_days" : [1, 3]
 }
 most_important = {

@@ -1,4 +1,5 @@
 import time
+from pathlib import Path
 import classes
 import db_driver
 db_driver.init_db()
@@ -12,10 +13,12 @@ from web_subscription.sub_page_loader import *
 from backup_db import backup_schedule
 from limited_inbounds import user_check_inbounds_rest, update_users_rest
 import base64
+import json
 import userBot.bot as userbot
 
 app = FastAPI()
-app.mount("/static", StaticFiles(directory="web_subscription/static"), name="static")
+BASE_DIR = Path(__file__).resolve().parent
+app.mount("/static", StaticFiles(directory=str(BASE_DIR / "web_subscription" / "static")), name="static")
 DENIED_LINK = (
     "vless://00000000-0000-0000-0000-000000000001@127.0.0.1:443"
     "?encryption=none&security=none&type=tcp#Подписка%20уже%20активирована\n"
@@ -54,7 +57,7 @@ UNCNOWN_DEVICE_BODY = base64.b64encode(UNCNOWN_DEVICE_LINK.encode()).decode()
 async def get_sub(request: Request):
     import tgbot
     import xui_connection
-    uuid = str(request.url).split('/')[-1]
+    uuid = str(request.path_params.get('uuid') or '').strip()
     if is_browser(request):
         return await send_sub_page(request, settings["vpn_name"], uuid)
 
@@ -74,8 +77,7 @@ async def get_sub(request: Request):
                .get('client', {})
                .get("totalGB", 0))
     if uuid in settings["whitelist"]:
-        return await fetch_real_sub(uuid, request, 1, 100000)
-    print(request.headers)
+        return await fetch_real_sub(uuid, request, mx_devices, len(device_info), totalgb, used_gb)
     hwid = request.headers.get('x-hwid') or request.headers.get("X-HWID")
     device_os = request.headers.get('x-device-os') or request.headers.get("X-DEVICE-OS")
     device = request.headers.get('x-device-model') or request.headers.get("X-DEVICE-MODEL")
@@ -84,30 +86,22 @@ async def get_sub(request: Request):
         await tgbot.sendmsg_admin(f'Неопознанное устройство: {name}')
         return make_denied_response(UNCNOWN_DEVICE_BODY)
 
-    if mx_devices <= len(device_info) and not classes.check_user_in_hwids(hwid, device_info):
+    expiry = userinfo.get('client', {}).get('expiryTime', 0)
+    if expiry > 0 and int(time.time() * 1000) > expiry:
+        return make_denied_response(EXPIRY_DEVICE_LINK)
+
+    status, current_count, actual_limit = db_driver.register_or_refresh_device(
+        uuid, hwid, device_os, device
+    )
+    if status == "limit":
         await tgbot.sendmsg_admin(f'Попытка повторного входа: {name}')
         return make_denied_response(DENIED_BODY)
-    else:
-        expiry = userinfo.get('client', {}).get('expiryTime', 0)
-        if expiry > 0 and int(time.time() * 1000) > expiry  :
-            return make_denied_response(EXPIRY_DEVICE_LINK)
+    if status == "not_found":
+        return make_denied_response(UNCNOWN_LINK)
 
-        if classes.check_user_in_hwids(hwid, device_info):
-            user.current_device = classes.user_update_hwid({
-                "hwid" : hwid,
-                "device_os" : device_os,
-                "device_model" : device,
-            }, device_info)
-            db_driver.update_device_data_by(user)
-            return await fetch_real_sub(uuid, request, mx_devices, len(device_info), totalgb, used_gb)
-        else:
-            user.current_device.append({
-                "hwid" : hwid,
-                "device_os" : device_os,
-                "device_model" : device,
-            })
-            db_driver.update_device_data_by(user)
-            return await fetch_real_sub(uuid, request, mx_devices, len(device_info), totalgb, used_gb)
+    return await fetch_real_sub(
+        uuid, request, actual_limit, current_count, totalgb, used_gb
+    )
 
 
 
@@ -145,9 +139,101 @@ def get_header_ci(headers, name: str) -> str:
     return ""
 
 
-async def fetch_real_sub(sub_id: str, request: Request, mx, cur, total_gb, remain_gb) -> Response:
+def _unique_lines(data: bytes) -> bytes:
+    seen = set()
+    out = []
+    for raw in data.splitlines():
+        line = raw.strip()
+        if not line or line in seen:
+            continue
+        seen.add(line)
+        out.append(line)
+    return b"\n".join(out) + (b"\n" if out else b"")
+
+
+def _decode_subscription_base64(content: bytes):
+    try:
+        text = content.decode("utf-8").strip()
+    except Exception:
+        return None
+    if not text:
+        return None
+    compact = "".join(text.split())
+    compact += "=" * (-len(compact) % 4)
+    try:
+        decoded = base64.b64decode(compact, validate=True)
+    except Exception:
+        return None
+    # Avoid treating arbitrary binary/text as a subscription payload.
+    if b"://" not in decoded:
+        return None
+    return decoded
+
+
+def _merge_subscription_content(primary: bytes, extra: bytes, content_type: str = "") -> bytes:
+    """Merge base and --rest panel subscriptions into one public response.
+
+    Happ and most V2Ray-style clients use either a base64 encoded URI list,
+    a plain URI list, or a JSON array. These are merged structurally. The
+    fallback is newline concatenation so unknown text formats still retain
+    both payloads rather than silently dropping restricted connections.
+    """
+    if not extra:
+        return primary
+
+    # JSON subscription.
+    if "json" in (content_type or "").lower() or primary.lstrip().startswith((b"[", b"{")):
+        try:
+            a = json.loads(primary.decode("utf-8"))
+            b = json.loads(extra.decode("utf-8"))
+            if isinstance(a, list) and isinstance(b, list):
+                merged = a + [item for item in b if item not in a]
+                return json.dumps(merged, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        except Exception:
+            pass
+
+    # Standard base64 URI subscription.
+    a64 = _decode_subscription_base64(primary)
+    b64 = _decode_subscription_base64(extra)
+    if a64 is not None and b64 is not None:
+        return base64.b64encode(_unique_lines(a64 + b"\n" + b64))
+
+    # Plain URI list.
+    if b"://" in primary and b"://" in extra:
+        return _unique_lines(primary + b"\n" + extra)
+
+    return primary.rstrip() + b"\n" + extra.lstrip()
+
+async def fetch_real_sub(
+    sub_id: str,
+    request: Request,
+    mx,
+    cur,
+    total_gb,
+    remain_gb,
+) -> Response:
     import tgbot
-    url = settings["XUI_SUB_URL"].format(sub_id=sub_id)
+    import subscription_service
+
+    url = settings["XUI_SUB_URL"].format(
+        sub_id=sub_id
+    )
+
+    rest_sub_id = await subscription_service.get_rest_sub_id(
+        sub_id
+    )
+
+    rest_url = (
+        settings["XUI_SUB_URL"].format(
+            sub_id=rest_sub_id
+        )
+        if rest_sub_id
+        else None
+    )
+
+    # ---------------------------------------------------------
+    # REQUEST HEADERS
+    # ---------------------------------------------------------
 
     excluded_request_headers = {
         "host",
@@ -155,6 +241,7 @@ async def fetch_real_sub(sub_id: str, request: Request, mx, cur, total_gb, remai
         "connection",
         "keep-alive",
         "transfer-encoding",
+        "accept-encoding",
     }
 
     forward_headers = {
@@ -162,23 +249,88 @@ async def fetch_real_sub(sub_id: str, request: Request, mx, cur, total_gb, remai
         for key, value in request.headers.items()
         if key.lower() not in excluded_request_headers
     }
-    async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+
+    # ---------------------------------------------------------
+    # REQUEST TO 3X-UI
+    # ---------------------------------------------------------
+
+    async with httpx.AsyncClient(
+        timeout=15.0,
+        verify=False,
+    ) as client:
+
         try:
-            resp = await client.get(
-                url,
-                headers={
-                    **forward_headers,
-                },
-            )
+            if rest_url:
+                resp, rest_resp = await asyncio.gather(
+                    client.get(
+                        url,
+                        headers=forward_headers,
+                    ),
+                    client.get(
+                        rest_url,
+                        headers=forward_headers,
+                    ),
+                )
+
+            else:
+                resp = await client.get(
+                    url,
+                    headers=forward_headers,
+                )
+
+                rest_resp = None
+
         except Exception as e:
-            await tgbot.sendmsg_admin(f"Error: {e}")
-            return make_denied_response(UNCNOWN_LINK)
+            await tgbot.sendmsg_admin(
+                f"Error: {e}"
+            )
 
-    if resp.status_code != 200 or not resp.content:
-        return make_denied_response(UNCNOWN_LINK)
+            return make_denied_response(
+                UNCNOWN_LINK
+            )
 
-    excluded_headers = {
+    # ---------------------------------------------------------
+    # CHECK MAIN SUBSCRIPTION
+    # ---------------------------------------------------------
+
+    if (
+        resp.status_code != 200
+        or not resp.content
+    ):
+        return make_denied_response(
+            UNCNOWN_LINK
+        )
+
+    # ---------------------------------------------------------
+    # MERGE MAIN + --REST
+    # ---------------------------------------------------------
+
+    content = resp.content
+
+    if (
+        rest_resp is not None
+        and rest_resp.status_code == 200
+        and rest_resp.content
+    ):
+        content = _merge_subscription_content(
+            resp.content,
+            rest_resp.content,
+            resp.headers.get(
+                "content-type",
+                "",
+            ),
+        )
+
+    # ---------------------------------------------------------
+    # RESPONSE HEADERS
+    #
+    # ВАЖНО:
+    # Все ключи храним ТОЛЬКО В LOWERCASE.
+    # ---------------------------------------------------------
+
+    excluded_response_headers = {
         "content-length",
+        "content-encoding",
         "transfer-encoding",
         "connection",
         "keep-alive",
@@ -187,49 +339,91 @@ async def fetch_real_sub(sub_id: str, request: Request, mx, cur, total_gb, remai
         "te",
         "trailer",
         "upgrade",
+
+        # Не нужно проксировать.
+        # Uvicorn сформирует свои.
+        "date",
+        "server",
     }
 
-    out_headers = {
-        key: value
-        for key, value in resp.headers.items()
-        if key.lower() not in excluded_headers
-    }
+    out_headers = {}
 
-    for h in (
-        "Subscription-Userinfo",
-        "Profile-Update-Interval",
-        "Profile-Title",
-        "Profile-Web-Page-Url",
-        "Support-Url",
+    for key, value in resp.headers.items():
+        key = key.lower()
+
+        if key in excluded_response_headers:
+            continue
+
+        out_headers[key] = value
+
+    # ---------------------------------------------------------
+    # ANNOUNCE
+    # ---------------------------------------------------------
+
+    original_announce = get_header_ci(
+        resp.headers,
         "Announce",
-    ):
-        val = get_header_ci(resp.headers, h)
-        if val:
-            out_headers[h] = val
+    ) or ""
 
-    # --- Announce: устройства ---
-    original_announce = out_headers.get("Announce", "")
-    if original_announce.startswith("base64:"):
+    if original_announce.startswith(
+        "base64:"
+    ):
         try:
-            original_text = base64.b64decode(original_announce[7:]).decode("utf-8")
+            original_text = (
+                base64.b64decode(
+                    original_announce[7:]
+                )
+                .decode("utf-8")
+            )
+
         except Exception:
             original_text = ""
+
     else:
-        original_text = original_announce or ""
+        original_text = (
+            original_announce
+        )
 
-    new_text = f"📱Устройств: {cur}/{mx}\n{original_text}".strip()
-    out_headers["Announce"] = "base64:" + base64.b64encode(new_text.encode("utf-8")).decode()
+    new_text = (
+        f"📱Устройств: {cur}/{mx}\n"
+        f"{original_text}"
+    ).strip()
 
-    # --- Subscription-Userinfo: трафик ---
-    info = parse_userinfo(get_header_ci(resp.headers, "Subscription-Userinfo"))
+    out_headers["announce"] = (
+        "base64:"
+        + base64.b64encode(
+            new_text.encode("utf-8")
+        ).decode()
+    )
+
+    # ---------------------------------------------------------
+    # SUBSCRIPTION USERINFO
+    # ---------------------------------------------------------
+
+    info = parse_userinfo(
+        get_header_ci(
+            resp.headers,
+            "Subscription-Userinfo",
+        )
+    )
+
     info["total"] = total_gb
     info["upload"] = 1
     info["download"] = remain_gb
 
-    out_headers["Subscription-Userinfo"] = build_userinfo(info)
+    out_headers[
+        "subscription-userinfo"
+    ] = build_userinfo(info)
 
-    return Response(content=resp.content, status_code=200, headers=out_headers)
+    # ---------------------------------------------------------
+    # RESPONSE
+    # ---------------------------------------------------------
 
+    return Response(
+        content=content,
+        status_code=resp.status_code,
+        headers=out_headers,
+    )
 def make_denied_response(info) -> Response:
     headers = {
         "Content-Type": "text/plain; charset=utf-8",
@@ -245,24 +439,19 @@ def is_browser(request: Request) -> bool:
     hwid = request.headers.get("x-hwid") or request.headers.get("X-HWID")
 
     if hwid:
-        print("NOT BROWSER! HWID!")
         return False  # клиент VPN
 
     vpn_ua = ("happ", "v2ray", "clash", "sing-box", "shadowrocket",
               "nekobox", "stash", "quantumult", "surge", "loon")
     if any(x in ua for x in vpn_ua):
-        print("NOT BROWSER! VPN CLIENT!")
         return False
 
     if "text/html" in accept:
-        print("BROWSER!")
         return True
 
     # запас: типичный браузерный UA без hwid
     if any(x in ua for x in ("mozilla", "chrome", "safari", "firefox", "edg")):
-        print("BROWSER!")
         return True
-    print("NO ONE MATCH!")
     return False
 
 async def run_bot():
@@ -293,6 +482,7 @@ async def main():
     users_check_inbounds_rest = asyncio.create_task(user_check_inbounds_rest())
     update_expire_user = asyncio.create_task(update_users_rest())
     userbot_task = asyncio.create_task(userbot.run_bot())
+    expiry_alert_task = asyncio.create_task(userbot.expiry_alert_loop())
     try:
         await server_task
     finally:
@@ -302,12 +492,14 @@ async def main():
         users_check_inbounds_rest.cancel()
         update_expire_user.cancel()
         userbot_task.cancel()
-        for t in (bot_task, backup, trash, users_check_inbounds_rest, update_expire_user):
+        expiry_alert_task.cancel()
+        for t in (bot_task, backup, trash, users_check_inbounds_rest, update_expire_user, userbot_task, expiry_alert_task):
             try:
                 await t
             except asyncio.CancelledError:
                 pass
         await tgbot.bot.session.close()
+        await userbot.bot.session.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
