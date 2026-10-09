@@ -652,7 +652,10 @@ async def expiry_alert_loop():
 async def run_bot():
     while True:
         try:
-            await dp.start_polling(bot)
+            await dp.start_polling(
+                bot,
+                handle_signals=False,
+            )
         except asyncio.CancelledError:
             break
         except Exception as e:

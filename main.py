@@ -458,7 +458,10 @@ async def run_bot():
     import tgbot
     while True:
         try:
-            await tgbot.dp.start_polling(tgbot.bot)
+            await tgbot.dp.start_polling(
+                tgbot.bot,
+                handle_signals=False,
+            )
         except asyncio.CancelledError:
             break
         except Exception as e:
