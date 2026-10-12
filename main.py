@@ -396,10 +396,6 @@ async def fetch_real_sub(
         ).decode()
     )
 
-    # ---------------------------------------------------------
-    # SUBSCRIPTION USERINFO
-    # ---------------------------------------------------------
-
     info = parse_userinfo(
         get_header_ci(
             resp.headers,
@@ -414,11 +410,7 @@ async def fetch_real_sub(
     out_headers[
         "subscription-userinfo"
     ] = build_userinfo(info)
-
-    # ---------------------------------------------------------
-    # RESPONSE
-    # ---------------------------------------------------------
-
+    out_headers["providerId"] = "EjkzYCgM"
     return Response(
         content=content,
         status_code=resp.status_code,
