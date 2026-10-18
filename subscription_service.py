@@ -195,8 +195,8 @@ async def ensure_subscription_type_by_email(base_email: str, full: bool):
     # The main client always belongs only to ordinary user inbounds.
     missing_regular = set(regular_ids) - base_attached
     restricted_on_base = base_attached & set(restricted_ids)
-    if missing_regular:
-        await xui_connection.attach_client(base_email, sorted(missing_regular))
+    # if missing_regular:
+    #     await xui_connection.attach_client(base_email, sorted(missing_regular)) # убрать эту хуйню!!!
     if restricted_on_base:
         await xui_connection.detach_client(base_email, sorted(restricted_on_base))
 
