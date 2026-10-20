@@ -14,6 +14,8 @@ from backup_db import backup_schedule
 from limited_inbounds import user_check_inbounds_rest, update_users_rest
 import base64
 import json
+import smart_routing
+import xui_connection
 import userBot.bot as userbot
 
 app = FastAPI()
@@ -261,16 +263,13 @@ async def fetch_real_sub(
 
         try:
             if rest_url:
-                resp, rest_resp = await asyncio.gather(
-                    client.get(
-                        url,
-                        headers=forward_headers,
-                    ),
-                    client.get(
-                        rest_url,
-                        headers=forward_headers,
-                    ),
-                )
+                resp = await client.get(url, headers=forward_headers)
+                # Secondary subscription is optional: a removed or temporarily
+                # unreachable restricted connection cannot invalidate the base.
+                try:
+                    rest_resp = await client.get(rest_url, headers=forward_headers)
+                except httpx.HTTPError:
+                    rest_resp = None
 
             else:
                 resp = await client.get(
@@ -320,6 +319,36 @@ async def fetch_real_sub(
                 "",
             ),
         )
+
+    # AUTO exists only in JSON subscriptions. A missing/removed node or
+    # an invalid --rest payload must not break normal subscription delivery.
+    try:
+        main_profiles = smart_routing.read_profiles(resp.content)
+        rest_profiles = (smart_routing.read_profiles(rest_resp.content)
+                         if rest_resp is not None and rest_resp.status_code == 200 else None)
+        if main_profiles:
+            # Persistent panel IDs survive changes to remark, host and TLS options.
+            # Failure to fetch the panel must not interrupt a subscription.
+            try:
+                panel_inbounds = await xui_connection.get_inbounds_full()
+                smart_routing.sync_panel_inbounds(panel_inbounds)
+                smart_routing.link_profiles_to_inbounds(main_profiles, panel_inbounds)
+                if rest_profiles and rest_sub_id:
+                    smart_routing.link_profiles_to_inbounds(rest_profiles, panel_inbounds, reserve=True)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception("Unable to refresh AUTO panel mapping")
+            smart_routing.remember(main_profiles)
+            if rest_sub_id and rest_profiles:
+                smart_routing.remember(rest_profiles, reserve=True)
+            content = smart_routing.append_auto(
+                content, resp.content,
+                rest_resp.content if rest_profiles and rest_sub_id else None,
+                has_reserve=bool(rest_sub_id and rest_profiles),
+            )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("AUTO profile generation failed")
 
     # ---------------------------------------------------------
     # RESPONSE HEADERS

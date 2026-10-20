@@ -435,3 +435,5 @@ async def set_subscription_device_limit(sub_id: str, limit: int):
         raise ValueError("Лимит не может быть отрицательным")
     db_driver.set_subscription_max_device(user.uuid, limit)
     return db_driver.get_data_by(user.uuid)
+
+#def get_inbound_auto(all_inbounds)

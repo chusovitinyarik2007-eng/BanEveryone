@@ -232,3 +232,8 @@ async def update_user(email, data):
     obj = info.get("obj") or {}
     inbound_ids = obj.get("inboundIds") or data.pop("id_inbounds", [])
     return await update_client(email, data, inbound_ids)
+
+async def get_inbounds_full():
+    """Get actual panel rows (options endpoint may omit edit fields)."""
+    data = await _request("GET", "/panel/api/inbounds/list")
+    return data.get("obj") or []

@@ -1,4 +1,5 @@
 import asyncio
+import secrets
 import os
 import shutil
 import sqlite3
@@ -46,6 +47,7 @@ async def start(message: Message):
         await message.answer("Нет доступа.")
         return
     await message.answer("Команды:\n"
+                         "<code>/auto</code> - настройка умной маршрутизации AUTO\n"
                          "<code>/info</code> - информация о пользователе\n"
                          "<code>/setlimit</code> - установить максимальное количество устройств по uuid\n"
                          "<code>/clear</code> uuid - очистить список hwid\n"
@@ -807,3 +809,306 @@ async def approve_subscription_request(callback: CallbackQuery):
             "Заявка помечена как failed, чтобы повторное нажатие не выполнило операцию дважды.",
             parse_mode="HTML",
         )
+
+# --------------------- AUTO / JSON routing (admin only) ---------------------
+import smart_routing
+import auto_rule_input
+from html import escape as _escape_auto
+
+
+class AutoRulesState(StatesGroup):
+    waiting_rules = State()
+    waiting_auto_name = State()
+
+
+# aiogram handles multiple updates concurrently by default. Serialize changes
+# to a particular admin's rules draft, and order fragments by message_id.
+_auto_rule_locks = {}
+
+
+def _rule_lock(user_id):
+    return _auto_rule_locks.setdefault(user_id, asyncio.Lock())
+
+
+def _rule_draft_keyboard(token):
+    return _auto_keyboard([
+        ("✅ Сохранить все части", f"auto:rulefinish:{token}"),
+        ("🧹 Начать ввод заново", f"auto:rulereset:{token}"),
+        ("❌ Отмена", f"auto:rulecancel:{token}"),
+    ], 1)
+
+
+def _auto_keyboard(items, width=2):
+    kb = InlineKeyboardBuilder()
+    for title, action in items:
+        kb.button(text=title, callback_data=action)
+    kb.adjust(width)
+    return kb.as_markup()
+
+
+def _auto_home():
+    switches = [(f"{'✅' if smart_routing.enabled() else '❌'} AUTO", "auto:master")]
+    switches.extend((f"{'✅' if smart_routing.pool_enabled(p) else '❌'} {name}", f"auto:switch:{p}")
+                    for p, name in smart_routing.POOL_NAMES.items())
+    switches.extend([("🗂 Настроить балансировщики", "auto:pools"),
+                     ("✏️ Название AUTO", "auto:rename"),
+                     ("📝 RU-сайты → DIRECT", "auto:rules:ru"),
+                     ("📝 Домены Gemini", "auto:rules:gemini"),
+                     ("🔄 Обновить", "auto:home")])
+    return _auto_keyboard(switches, 2)
+
+
+async def _auto_render(callback, title, markup):
+    await callback.message.edit_text(title, reply_markup=markup, parse_mode="HTML")
+
+
+async def _panel_auto_nodes():
+    rows = await xui_connection.get_inbounds_full()
+    return smart_routing.panel_nodes(rows)
+
+
+def _page_controls(entries, pool, page):
+    per_page = 12
+    pages = max(1, (len(entries) + per_page - 1) // per_page)
+    page = max(0, min(page, pages - 1))
+    buttons = []
+    for n in entries[page * per_page:(page+1)*per_page]:
+        # The All pool implicitly includes nodes configured in the other
+        # primary pools. A direct membership stays independently editable.
+        inherited = pool == "all" and bool(set(n['pools']) & {"gemini", "other"})
+        mark = "✅" if pool in n['pools'] else "🔗" if inherited else "▫️"
+        buttons.append((f"{mark} {n['name'][:38]} [{n['id'].split(':')[-1]}]",
+                        f"auto:toggle:{pool}:{n['id'].split(':')[-1]}:{page}"))
+    if page > 0:
+        buttons.append(("⬅️", f"auto:pool:{pool}:{page-1}"))
+    if page < pages - 1:
+        buttons.append(("➡️", f"auto:pool:{pool}:{page+1}"))
+    buttons.append(("◀️ К балансировщикам", "auto:pools"))
+    return buttons, page, pages
+
+
+@dp.message(Command("auto"))
+async def auto_menu(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    await message.answer("🔀 <b>AUTO · настройка JSON-подписки</b>\n"
+                         "Gemini → Все серверы, Все сайты → Все серверы, "
+                         "Все серверы → Антиглушилка (если доступна).\n"
+                         "RU-сайты всегда идут в DIRECT по списку правил из бота.\n"
+                         "Пулы выбираются из инбаундов панели; отсутствующие узлы игнорируются.",
+                         reply_markup=_auto_home(), parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("auto:"))
+async def auto_callbacks(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    data = callback.data.split(":")
+    action = data[1]
+    if action in ("rulefinish", "rulereset", "rulecancel") and len(data) == 3:
+        async with _rule_lock(callback.from_user.id):
+            draft = await state.get_data()
+            if (await state.get_state() != AutoRulesState.waiting_rules.state
+                    or draft.get("auto_rule_token") != data[2]):
+                await callback.answer("Это меню устарело. Откройте /auto заново.", show_alert=True)
+                return
+            await callback.answer()
+            if action == "rulecancel":
+                await state.clear()
+                await callback.message.answer("Редактирование правил отменено. Старые правила сохранены.",
+                                              reply_markup=_auto_home())
+            elif action == "rulereset":
+                await state.update_data(auto_rule_parts=[])
+                await callback.message.answer("🧹 Черновик очищен. Отправьте правила заново, "
+                                              "затем нажмите «Сохранить все части».",
+                                              reply_markup=_rule_draft_keyboard(data[2]))
+            else:
+                await _auto_finish_rules(callback.message, state, draft)
+        return
+    if action == "master":
+        smart_routing.set_option("enabled", not smart_routing.enabled())
+    elif action == "switch" and len(data) == 3 and data[2] in smart_routing.POOL_NAMES:
+        p = data[2]
+        smart_routing.set_option("enabled_" + p, not smart_routing.pool_enabled(p))
+    elif action == "toggle" and len(data) == 5 and data[2] in smart_routing.POOL_NAMES:
+        try:
+            entries = await _panel_auto_nodes()
+            node_id = smart_routing.panel_key(data[3])
+            if not any(n['id'] == node_id for n in entries):
+                raise ValueError("Инбаунд отсутствует в панели")
+            smart_routing.toggle_node(node_id, data[2])
+            await callback.answer("Состав пула обновлён")
+        except (ValueError, RuntimeError) as exc:
+            await callback.answer(str(exc)[:150], show_alert=True)
+            return
+        action, data = "pool", ["auto", "pool", data[2], data[4]]
+    elif action in ("rename", "renames") and len(data) == 2:
+        await state.set_state(AutoRulesState.waiting_auto_name)
+        await callback.answer()
+        await callback.message.answer(
+            "✏️ <b>Название генерируемого подключения AUTO</b>\n"
+            f"Текущее: <b>{_escape_auto(smart_routing.auto_name())}</b>\n\n"
+            "Отправьте новое имя одним сообщением.\n"
+            "<code>-</code> — восстановить стандартное имя.\n"
+            "<code>/cancel</code> — отмена.\n\n"
+            "Инбаунды в панели 3x-ui не изменяются.", parse_mode="HTML")
+        return
+    elif action == "edit" and len(data) == 3 and data[2] in ("ru", "gemini"):
+        token = secrets.token_hex(5)
+        async with _rule_lock(callback.from_user.id):
+            await state.set_state(AutoRulesState.waiting_rules)
+            await state.set_data({"auto_pool": data[2], "auto_rule_parts": [],
+                                  "auto_rule_token": token})
+        rules = smart_routing.pool_rules(data[2])
+        await callback.answer()
+        await callback.message.answer(
+            f"📝 Изменение правил <b>{'RU-сайты → DIRECT' if data[2] == 'ru' else 'Gemini'}</b>\n"
+            "Отправляйте правила Xray, по одному в строке, <b>сколькими угодно сообщениями</b>.\n"
+            "Пример: <code>domain:example.ru</code>\n"
+            "Все части накапливаются; до подтверждения текущие правила не меняются.\n"
+            "После последней части нажмите «✅ Сохранить все части» или /done.\n"
+            "Для очистки правил отправьте <code>-</code> и подтвердите сохранение.\n"
+            "Команды: /reset — начать ввод заново, /cancel — выйти без изменений.\n\n"
+            f"Текущих правил: {len(rules)}\n"
+            + _escape_auto("\n".join(rules)[:1200]),
+            reply_markup=_rule_draft_keyboard(token), parse_mode="HTML")
+        return
+    if action in ("home", "master", "switch"):
+        await _auto_render(callback, "🔀 <b>AUTO · глобальные настройки</b>\n"
+                           "Выключенный пул исключается из маршрутизации и набора выходов.", _auto_home())
+    elif action == "pools":
+        names = smart_routing.POOL_NAMES
+        buttons = [(f"{v}", f"auto:pool:{p}") for p, v in names.items()]
+        buttons.append(("◀️ Назад", "auto:home"))
+        await _auto_render(callback, "🗂 <b>Балансировщики AUTO</b>\n"
+                           "Выберите балансировщик и отметьте подключения.\n"
+                           "«Все серверы» автоматически включает выбранные серверы "
+                           "Gemini и «Все сайты»; отдельные узлы можно добавить вручную.\n"
+                           "Старые RU-серверы автоматически перенесены в «Все серверы». "
+                           "RU-домены направляются в DIRECT.", _auto_keyboard(buttons, 1))
+    elif action == "pool" and len(data) in (3, 4) and data[2] in smart_routing.POOL_NAMES:
+        p = data[2]
+        try:
+            entries = await _panel_auto_nodes()
+        except Exception as exc:
+            await callback.answer(f"Ошибка панели: {str(exc)[:90]}", show_alert=True)
+            return
+        page = int(data[3]) if len(data) == 4 and data[3].isdigit() else 0
+        buttons, page, pages = _page_controls(entries, p, page)
+        await _auto_render(callback, f"🗂 <b>{_escape_auto(smart_routing.POOL_NAMES[p])}</b>\n"
+                           f"Инбаундов: {len(entries)} · Страница {page+1}/{pages}\n"
+                           "✅ Назначен вручную · 🔗 включён через другой основной пул · ▫️ не назначен.\n"
+                           "Нажмите на подключение для изменения его прямого назначения.",
+                           _auto_keyboard(buttons, 1))
+    elif action == "rules" and len(data) == 3 and data[2] in ("ru", "gemini"):
+        p = data[2]
+        rules = smart_routing.pool_rules(p)
+        label = "RU-сайты → DIRECT" if p == "ru" else "Gemini"
+        await _auto_render(callback, f"📝 <b>Правила {label}</b>\n"
+                           f"Всего: {len(rules)}\n<pre>{_escape_auto(chr(10).join(rules)[:2700])}</pre>",
+                           _auto_keyboard([("✏️ Изменить", f"auto:edit:{p}"),
+                                           ("◀️ Назад", "auto:home")], 1))
+    if action != "pool" or callback.data.startswith("auto:pool:"):
+        await callback.answer()
+
+
+async def _auto_finish_rules(reply_message: Message, state: FSMContext, data: dict):
+    """Commit only a complete, validated draft; keep old rules on any error."""
+    pool = data.get("auto_pool")
+    if pool not in ("ru", "gemini"):
+        await reply_message.answer("Пул не выбран. Откройте /auto заново.")
+        return
+    try:
+        rules = auto_rule_input.parse_rules(data.get("auto_rule_parts", []))
+    except auto_rule_input.RuleInputError as exc:
+        await reply_message.answer(str(exc))
+        return
+    smart_routing.set_option("rules_" + pool, rules)
+    await state.clear()
+    await reply_message.answer(f"✅ Все правила {pool} сохранены: {len(rules)}. "
+                               "Следующее обновление AUTO применит новый список.",
+                               reply_markup=_auto_home())
+
+
+@dp.message(Command("cancel"), AutoRulesState.waiting_rules)
+async def auto_cancel_rules(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    async with _rule_lock(message.from_user.id):
+        await state.clear()
+    await message.answer("Редактирование правил отменено. Старые правила не изменены.",
+                         reply_markup=_auto_home())
+
+
+@dp.message(Command("reset"), AutoRulesState.waiting_rules)
+async def auto_reset_rules(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    async with _rule_lock(message.from_user.id):
+        data = await state.get_data()
+        await state.update_data(auto_rule_parts=[])
+    await message.answer("🧹 Черновик очищен. Отправляйте правила заново.",
+                         reply_markup=_rule_draft_keyboard(data["auto_rule_token"]))
+
+
+@dp.message(Command("done"), AutoRulesState.waiting_rules)
+async def auto_finish_rules_command(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    async with _rule_lock(message.from_user.id):
+        await _auto_finish_rules(message, state, await state.get_data())
+
+
+@dp.message(AutoRulesState.waiting_rules)
+async def auto_collect_rules(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    if not message.text or message.text.startswith("/"):
+        await message.answer("Отправляйте текстовые части правил. /done — сохранить все, "
+                             "/reset — начать заново, /cancel — отменить.")
+        return
+    async with _rule_lock(message.from_user.id):
+        data = await state.get_data()
+        if data.get("auto_pool") not in ("ru", "gemini"):
+            await message.answer("Пул не выбран. Откройте /auto заново.")
+            return
+        parts = data.get("auto_rule_parts", [])
+        try:
+            updated = auto_rule_input.add_part(parts, message.message_id, message.text)
+        except auto_rule_input.RuleInputError as exc:
+            await message.answer(str(exc))
+            return
+        if updated == parts:
+            return
+        await state.update_data(auto_rule_parts=updated)
+        count, lines = auto_rule_input.draft_statistics(updated)
+        await message.answer(
+            f"📥 Получено частей: {count}, строк правил в черновике: {lines}.\n"
+            "Отправьте остальные части. После последней нажмите «✅ Сохранить все части» "
+            "или /done. Пока ничего не изменено.",
+            reply_markup=_rule_draft_keyboard(data["auto_rule_token"]))
+
+
+@dp.message(Command("cancel"), AutoRulesState.waiting_auto_name)
+async def auto_cancel_rename(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Изменение названия AUTO отменено.", reply_markup=_auto_home())
+
+
+@dp.message(AutoRulesState.waiting_auto_name)
+async def auto_save_auto_name(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    name = (message.text or "").strip()
+    try:
+        saved = smart_routing.set_auto_name(None if name == "-" else name)
+    except ValueError as exc:
+        await message.answer(_escape_auto(str(exc)), parse_mode="HTML")
+        return
+    await state.clear()
+    await message.answer(
+        f"✅ Новое название подключения AUTO: <b>{_escape_auto(saved)}</b>\n"
+        "Остальные подключения панели 3x-ui не изменены. "
+        "Новое имя появится при следующем обновлении JSON-подписки в клиенте.",
+        reply_markup=_auto_home(), parse_mode="HTML")
