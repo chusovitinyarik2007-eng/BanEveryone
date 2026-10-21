@@ -544,7 +544,7 @@ def build_auto(primary, rest=None, has_reserve=False):
         "routing": {"domainStrategy": panel_routing.get("domainStrategy", "AsIs"),
                     "domainMatcher": panel_routing.get("domainMatcher", "hybrid"),
                     "balancers": balancers, "rules": rules},
-        "observatory": {"enableConcurrency": True, "probeInterval": "30s",
+        "observatory": {"enableConcurrency": True, "probeInterval": "1m",
                         "probeUrl": "https://www.gstatic.com/generate_204", "subjectSelector": ["auto_node_"]},
     }
     # DNS belongs to the panel. Preserve its DoH addresses, per-domain
