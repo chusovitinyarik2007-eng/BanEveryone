@@ -175,14 +175,32 @@ def candidates(profiles, is_reserve=False):
     return results
 
 
+def _profile_mapping_key(endpoint_id, name, reserve=False):
+    """Distinguish separate panel profiles sharing the same endpoint.
+
+    Keep the old endpoint-only mapping as a fallback for databases generated
+    before this change. Scope by subscription to avoid main/--rest collisions.
+    """
+    source = "reserve" if reserve else "main"
+    label = hashlib.sha256(_name_key(name).encode("utf-8")).hexdigest()[:16]
+    return f"profile:{source}:{endpoint_id}:{label}"
+
+
 def remember(profiles, reserve=False):
     """Cache identity matches only; refreshing a subscription never creates nodes."""
     count = 0
     with db() as con:
         for ident, name, _, _ in candidates(profiles, reserve):
-            resolved = _resolve_node_id(con, name, ident)
+            profile_key = _profile_mapping_key(ident, name, reserve)
+            existing = con.execute("SELECT node_id FROM smart_endpoint_map WHERE endpoint_id=?",
+                                   (profile_key,)).fetchone()
+            # A profile-specific association is authoritative; the legacy
+            # endpoint-only association may belong to a different inbound.
+            resolved = (existing[0] if existing and con.execute(
+                "SELECT 1 FROM smart_nodes WHERE id=?", (existing[0],)).fetchone()
+                else _resolve_node_id(con, name, ident))
             if resolved:
-                con.execute("INSERT OR REPLACE INTO smart_endpoint_map VALUES (?,?)", (ident, resolved))
+                con.execute("INSERT OR REPLACE INTO smart_endpoint_map VALUES (?,?)", (profile_key, resolved))
             count += 1
     return count
 
@@ -230,7 +248,12 @@ def link_profiles_to_inbounds(profiles, inbounds, reserve=False):
             if len(matches) != 1:
                 matches = candidates_by_name.get(_name_key(name), set())
             if len(matches) == 1:
-                con.execute("INSERT OR REPLACE INTO smart_endpoint_map VALUES (?,?)", (ident, next(iter(matches))))
+                node_id = next(iter(matches))
+                con.execute("INSERT OR REPLACE INTO smart_endpoint_map VALUES (?,?)",
+                            (_profile_mapping_key(ident, name, reserve), node_id))
+                # Retain the endpoint-only association for compatibility, but
+                # never rely on it over a profile-specific association.
+                con.execute("INSERT OR IGNORE INTO smart_endpoint_map VALUES (?,?)", (ident, node_id))
 
 
 def _merge_pools(a, b):
@@ -440,14 +463,25 @@ def build_auto(primary, rest=None, has_reserve=False):
     configured = {n["id"]: n["pools"] for n in nodes()}
     with db() as con:
         mapped = dict(con.execute("SELECT endpoint_id,node_id FROM smart_endpoint_map").fetchall())
+    # Shared endpoint addresses are possible across different panel inbounds.
+    # Only disambiguate their outbound tags when the panel IDs differ.
+    endpoint_owners = {}
+    for ep_id, display_name, _, is_reserve in profiles:
+        owner = mapped.get(_profile_mapping_key(ep_id, display_name, is_reserve),
+                           mapped.get(ep_id, ep_id))
+        endpoint_owners.setdefault((is_reserve, ep_id), set()).add(owner)
     unique = {}
     memberships = {name: [] for name in POOL_NAMES}
     outputs = []
     # A single physical endpoint may belong to Gemini, Other, and All at the
     # same time. Only currently issued, assigned endpoints are included.
     for ident, name, outbound, is_rest in profiles:
-        scoped_ident = ("reserve_" if is_rest else "main_") + ident
-        membership = configured.get(mapped.get(ident, ident), [])
+        profile_key = _profile_mapping_key(ident, name, is_rest)
+        resolved_id = mapped.get(profile_key, mapped.get(ident, ident))
+        collision = len(endpoint_owners[(is_rest, ident)]) > 1
+        scoped_ident = ("reserve_" if is_rest else "main_") + (
+            ident + "_" + resolved_id.replace(":", "_") if collision else ident)
+        membership = configured.get(resolved_id, [])
         eligible = ("reserve",) if is_rest else ("gemini", "other", "all")
         selected = [pool for pool in eligible if pool in membership and pool_enabled(pool)
                     and (not is_rest or has_reserve)]

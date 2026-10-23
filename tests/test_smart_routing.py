@@ -497,3 +497,34 @@ class AutoRoutingTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class DuplicateEndpointRegressionTests(unittest.TestCase):
+    setUp = AutoRoutingTests.setUp
+    outbound = staticmethod(AutoRoutingTests.outbound)
+    profile = AutoRoutingTests.profile
+    """A shared external endpoint must not erase distinct panel inbound IDs."""
+
+    def test_two_main_and_two_reserve_profiles_sharing_endpoints(self):
+        main = [self.profile('192.0.2.25', 443, 'Main alpha'),
+                self.profile('192.0.2.25', 443, 'Main beta')]
+        reserve = [self.profile('198.51.100.25', 443, 'Reserve alpha'),
+                   self.profile('198.51.100.25', 443, 'Reserve beta')]
+        panel = [{'id': i, 'remark': profile['remarks'], 'protocol': 'vless', 'port': 443}
+                 for i, profile in enumerate(main + reserve, 1)]
+        s.sync_panel_inbounds(panel)
+        s.link_profiles_to_inbounds(main, panel)
+        s.link_profiles_to_inbounds(reserve, panel, reserve=True)
+        for i in (1, 2):
+            s.toggle_node(s.panel_key(i), 'other')
+        for i in (3, 4):
+            s.toggle_node(s.panel_key(i), 'reserve')
+        # Repeated refresh should not collapse the associations.
+        for _ in range(3):
+            s.remember(main)
+            s.remember(reserve, reserve=True)
+        conf = s.build_auto(json.dumps(main), json.dumps(reserve), True)
+        lbs = {b['tag']: b['selector'] for b in conf['routing']['balancers']}
+        self.assertEqual(len(lbs['auto_lb_other']), 2)
+        self.assertEqual(len(lbs['auto_lb_all']), 2)
+        self.assertEqual(len(lbs['auto_lb_reserve']), 2)
+        self.assertEqual(len({o['tag'] for o in conf['outbounds']}), len(conf['outbounds']))
