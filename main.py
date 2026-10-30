@@ -23,7 +23,15 @@ from fastapi import Request  # Нужно импортировать из fastap
 
 app = FastAPI()
 BASE_DIR = Path(__file__).resolve().parent
-app.mount("/static", StaticFiles(directory=str(BASE_DIR / "web_subscription" / "static")), name="static")
+sub_prefix = "/" + settings["sub"].strip("/")
+
+app.mount(
+    f"{sub_prefix}/static",
+    StaticFiles(
+        directory=str(BASE_DIR / "web_subscription" / "static")
+    ),
+    name="subscription_static"
+)
 # Admin router must precede the generic subscription /{uuid} route.
 import admin_web
 app.include_router(admin_web.router, prefix="/" + settings["sub"].strip("/") + "/adm")
