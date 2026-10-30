@@ -39,7 +39,7 @@ async def _request(sub_id):
     if not template:
         raise RuntimeError("BASE_SUB_URL is not set")
     url = template.format(sub_id=sub_id)
-    # CA validation is enabled by default. For private CAs use a custom trust store.
+
     async with httpx.AsyncClient(timeout=12.0, verify=False) as client:
         response = await client.get(url, headers={"Accept": "text/plain"})
         response.raise_for_status()
@@ -70,7 +70,7 @@ async def send_sub_page(request, vpn_name, uuid):
 
     # Existing policy: connection URIs are visible for unlimited subscriptions only.
     # Do not even retrieve URIs for ordinary subscriptions.
-    keys_visible = int(data.get("expiryTime") or 1) == 0
+    keys_visible = int(data.get("expiryTime", 1)) == 0
     keys = []
     if keys_visible:
         try:
