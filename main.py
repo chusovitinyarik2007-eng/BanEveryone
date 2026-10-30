@@ -18,6 +18,8 @@ import smart_routing
 from subscription_clients import classify, NO_CACHE
 import xui_connection
 import userBot.bot as userbot
+from fastapi import Request  # Нужно импортировать из fastapi
+
 
 app = FastAPI()
 BASE_DIR = Path(__file__).resolve().parent
