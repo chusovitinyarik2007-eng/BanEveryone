@@ -11,6 +11,7 @@ import re
 from contextlib import contextmanager
 
 import classes
+import routing_balancers as rb
 
 POOL_NAMES = {"gemini": "✨ Gemini", "other": "🌍 Все сайты", "all": "🔄 Все серверы", "reserve": "🛟 Антиглушилка"}
 DEFAULT_RULES = {
@@ -64,6 +65,10 @@ def option(key, default=None):
 def set_option(key, value):
     with db() as con:
         con.execute("INSERT OR REPLACE INTO smart_options VALUES (?,?)", (key, json.dumps(value, ensure_ascii=False)))
+    if key.startswith(('rules_', 'enabled_')):
+        suffix = key.split('_', 1)[1]
+        if suffix in POOL_NAMES:
+            rb.update(suffix, **{('rules' if key.startswith('rules_') else 'enabled'): value})
 
 
 def auto_name():
@@ -307,7 +312,7 @@ def sync_panel_inbounds(inbounds):
                 ident = panel_key(inbound["id"])
             except (TypeError, KeyError, ValueError):
                 continue
-            if ident in seen or str(inbound.get("protocol", "")).lower() not in PROXY_PROTOCOLS:
+            if ident in seen:
                 continue
             seen.add(ident)
             name = str(inbound.get("remark") or f"Инбаунд #{inbound['id']}").strip()[:110]
@@ -346,7 +351,7 @@ def _resolve_node_id(con, name, endpoint_id):
 
 
 def toggle_node(ident, pool):
-    if pool not in POOL_NAMES:
+    if pool not in {b["id"] for b in rb.all_balancers()}:
         raise ValueError("Неизвестный пул")
     with db() as con:
         row = con.execute("SELECT pools FROM smart_nodes WHERE id=?", (ident,)).fetchone()
@@ -450,7 +455,11 @@ def _panel_dns(profiles):
 
 
 def build_auto(primary, rest=None, has_reserve=False):
-    """Construct AUTO profile. Return None if source is not JSON or disabled."""
+    """Generate Xray AUTO from editable pool definitions and active panel nodes.
+
+    Panel DIRECT/BLOCK are always first, including during each fallback
+    loopback pass. An absent --rest never exposes reserve nodes to base users.
+    """
     if not enabled():
         return None
     base = read_profiles(primary)
@@ -460,21 +469,20 @@ def build_auto(primary, rest=None, has_reserve=False):
     profiles = candidates(base) + (candidates(extra, True) if (has_reserve and extra) else [])
     if not profiles:
         return None
-    configured = {n["id"]: n["pools"] for n in nodes()}
+    definitions = [b for b in rb.all_balancers() if b['enabled']]
+    if not definitions:
+        return None
+    configured = {n['id']: n['pools'] for n in nodes()}
     with db() as con:
         mapped = dict(con.execute("SELECT endpoint_id,node_id FROM smart_endpoint_map").fetchall())
-    # Shared endpoint addresses are possible across different panel inbounds.
-    # Only disambiguate their outbound tags when the panel IDs differ.
     endpoint_owners = {}
     for ep_id, display_name, _, is_reserve in profiles:
         owner = mapped.get(_profile_mapping_key(ep_id, display_name, is_reserve),
                            mapped.get(ep_id, ep_id))
         endpoint_owners.setdefault((is_reserve, ep_id), set()).add(owner)
     unique = {}
-    memberships = {name: [] for name in POOL_NAMES}
+    memberships = {b['id']: [] for b in definitions}
     outputs = []
-    # A single physical endpoint may belong to Gemini, Other, and All at the
-    # same time. Only currently issued, assigned endpoints are included.
     for ident, name, outbound, is_rest in profiles:
         profile_key = _profile_mapping_key(ident, name, is_rest)
         resolved_id = mapped.get(profile_key, mapped.get(ident, ident))
@@ -482,111 +490,107 @@ def build_auto(primary, rest=None, has_reserve=False):
         scoped_ident = ("reserve_" if is_rest else "main_") + (
             ident + "_" + resolved_id.replace(":", "_") if collision else ident)
         membership = configured.get(resolved_id, [])
-        eligible = ("reserve",) if is_rest else ("gemini", "other", "all")
-        selected = [pool for pool in eligible if pool in membership and pool_enabled(pool)
+        eligible = [b for b in definitions if b['scope'] == ('reserve' if is_rest else 'main')
                     and (not is_rest or has_reserve)]
-        # All is a superset of the two primary pools plus explicitly selected
-        # nodes (including migrated old RU nodes), not a separate RU balancer.
-        in_all = (not is_rest and pool_enabled("all") and
-                  any(pool in membership for pool in ("gemini", "other", "all"))
-                  and ("all" in membership or any(pool in selected for pool in ("gemini", "other"))))
-        if not selected and not in_all:
+        selected = [b['id'] for b in eligible if b['id'] in membership]
+        if not selected:
             continue
         tag = unique.get(scoped_ident)
         if tag is None:
-            tag = "auto_node_" + scoped_ident
+            tag = 'auto_node_' + scoped_ident
             unique[scoped_ident] = tag
-            outbound["tag"] = tag
+            outbound['tag'] = tag
             outputs.append(outbound)
         for pool in selected:
             if tag not in memberships[pool]:
                 memberships[pool].append(tag)
-        if in_all and tag not in memberships["all"]:
-            memberships["all"].append(tag)
-
-    if not any(memberships[p] for p in ("gemini", "other", "all")):
+    active = {p for p, members in memberships.items() if members}
+    if not active or not any(b['scope'] == 'main' and b['id'] in active for b in definitions):
         return None
-    active = {p: bool(memberships[p]) and pool_enabled(p) for p in POOL_NAMES}
-    active["reserve"] = active["reserve"] and has_reserve
+    active_defs = [b for b in definitions if b['id'] in active]
+    all_definitions = {b['id']: b for b in rb.all_balancers()}
+    def resolve_fallback(b):
+        """Skip absent optional pools without creating dangling loopbacks."""
+        target = b['fallback']
+        visited = {b['id']}
+        while target in all_definitions and target not in active and target not in visited:
+            visited.add(target)
+            target = all_definitions[target]['fallback']
+        return target if target in active or target in ('direct', 'block', 'none') else 'block'
 
-    if active["all"]:
-        outputs.append({"tag": "auto_to_all", "protocol": "loopback", "settings": {"inboundTag": "auto_fallback_all"}})
-    if active["reserve"]:
-        outputs.append({"tag": "auto_to_reserve", "protocol": "loopback", "settings": {"inboundTag": "auto_fallback_reserve"}})
-    outputs.append({"tag": "auto_exhausted", "protocol": "blackhole", "settings": {}})
-
+    destinations = {b['id']: resolve_fallback(b) for b in active_defs}
+    # Only targets of actual fallback edges need a loopback inbound.
+    fallback_targets = {target for target in destinations.values() if target in active}
+    fallback_tags = {b['id']: 'auto_fallback_' + b['id'] for b in definitions if b['id'] in fallback_targets}
+    # Each routed fallback re-enters the routing engine with its own inboundTag.
+    for p in fallback_tags:
+        outputs.append({'tag': 'auto_to_' + p, 'protocol': 'loopback',
+                        'settings': {'inboundTag': fallback_tags[p]}})
+    outputs.append({'tag': 'auto_exhausted', 'protocol': 'blackhole', 'settings': {}})
     balancers = []
-    for pool in ("gemini", "other", "all", "reserve"):
-        if not active[pool]:
-            continue
-        b = {"tag": "auto_lb_" + pool, "selector": memberships[pool], "strategy": {"type": "leastPing"}}
-        if pool in ("gemini", "other"):
-            b["fallbackTag"] = ("auto_to_all" if active["all"] else
-                                "auto_to_reserve" if active["reserve"] else "auto_exhausted")
-        elif pool == "all":
-            b["fallbackTag"] = "auto_to_reserve" if active["reserve"] else "auto_exhausted"
-        else:
-            b["fallbackTag"] = "auto_exhausted"
-        balancers.append(b)
-
+    for b in active_defs:
+        target = destinations[b['id']]
+        # If an optional pool is absent, fail closed instead of referencing a
+        # non-existent balancing target or routing into an infinite loop.
+        fallback = ('auto_to_' + target if target in active
+                    else 'auto_panel_direct' if target == 'direct'
+                    else 'auto_exhausted')
+        balancers.append({'tag': 'auto_lb_' + b['id'],
+                          'selector': memberships[b['id']],
+                          'strategy': {'type': b['strategy']},
+                          'fallbackTag': fallback})
     template = base[0]
-    inbounds = copy.deepcopy(template.get("inbounds") or [])
-    tags = [x.get("tag") for x in inbounds if isinstance(x, dict) and x.get("tag")]
+    inbounds = copy.deepcopy(template.get('inbounds') or [])
+    tags = list(dict.fromkeys(x['tag'] for x in inbounds if isinstance(x, dict) and x.get('tag')))
     if not tags:
         return None
-    fallback_tags = []
-    if active["all"]:
-        fallback_tags.append("auto_fallback_all")
-    if active["reserve"]:
-        fallback_tags.append("auto_fallback_reserve")
-    panel_rules, panel_outbounds, panel_routing = _global_panel_rules(base, tags, fallback_tags)
-    # Xray evaluates routing rules top-to-bottom. Panel DIRECT/BLOCK rules
-    # must be FIRST on every pass, including a loopback from All to Reserve.
-    # Otherwise matching destinations could leak into the reserve balancer.
+    panel_rules, panel_outbounds, panel_routing = _global_panel_rules(base, tags, list(fallback_tags.values()))
+    # The panel has absolute priority over ALL new custom balancers/fallbacks.
     rules = list(panel_rules)
-    outputs.extend(panel_outbounds)
-    if active["reserve"]:
-        rules.append({"type": "field", "inboundTag": ["auto_fallback_reserve"],
-                      "balancerTag": "auto_lb_reserve"})
-    if active["all"]:
-        rules.append({"type": "field", "inboundTag": ["auto_fallback_all"],
-                      "balancerTag": "auto_lb_all"})
-
-    ru_domains = pool_rules("ru")
+    if (pool_rules('ru') or any(target == 'direct' for target in destinations.values())) and not any(
+            out['tag'] == 'auto_panel_direct' for out in outputs):
+        outputs.append({'tag': 'auto_panel_direct', 'protocol': 'freedom', 'settings': {}})
+    # Replace the default direct if panel defines a custom freedom outbound.
+    for item in panel_outbounds:
+        outputs[:] = [o for o in outputs if o['tag'] != item['tag']]
+        outputs.append(item)
+    for pool in reversed(list(fallback_tags)):
+        rules.append({'type': 'field', 'inboundTag': [fallback_tags[pool]],
+                      'balancerTag': 'auto_lb_' + pool})
+    ru_domains = pool_rules('ru')
     if ru_domains:
-        # Reuse the panel's actual freedom outbound if already copied; never
-        # create a duplicate or select a proxy for RU domains.
-        if not any(ob.get("tag") == "auto_panel_direct" for ob in outputs):
-            outputs.append({"tag": "auto_panel_direct", "protocol": "freedom", "settings": {}})
-        rules.append({"type": "field", "inboundTag": tags, "domain": ru_domains,
+        rules.append({'type': 'field', 'inboundTag': tags, 'domain': ru_domains,
                       "outboundTag": "auto_panel_direct"})
-    gemini_domains = pool_rules("gemini")
-    if active["gemini"] and gemini_domains:
-        rules.append({"type": "field", "inboundTag": tags, "domain": gemini_domains,
-                      "balancerTag": "auto_lb_gemini"})
-    # The 'Все сайты' pool handles everything not matched above. If it has no
-    # available nodes, fall back to All; do not refer to nonexistent pools.
-    catchall = next(("auto_lb_" + p for p in ("other", "all", "gemini") if active[p]), None)
-    if catchall is None:
+    # Specific rules are checked in ascending user-defined priority.
+    # An empty rule list does not automatically match all traffic: only the
+    # explicitly chosen default balancer is used for the final catchall.
+    for b in active_defs:
+        domains, ips = rb.split_rules(b['rules'])
+        for kind, values in (('domain', domains), ('ip', ips)):
+            if values:
+                rules.append({'type': 'field', 'inboundTag': tags, kind: values,
+                              'balancerTag': 'auto_lb_' + b['id']})
+    default = next((b for b in active_defs if b['is_default'] and b['scope'] == 'main'), None)
+    if default is None:
+        default = next((b for b in active_defs if b['scope'] == 'main'), None)
+    if default is None:
         return None
-    rules.append({"type": "field", "inboundTag": tags, "balancerTag": catchall})
+    rules.append({'type': 'field', 'inboundTag': tags, 'balancerTag': 'auto_lb_' + default['id']})
     config = {
-        "remarks": auto_name(),
-        "meta": {"serverDescription": (auto_name() if option("auto_name") else AUTO_DEFAULT_DESCRIPTION)},
-        "inbounds": inbounds,
-        "outbounds": outputs,
-        "routing": {"domainStrategy": panel_routing.get("domainStrategy", "AsIs"),
-                    "domainMatcher": panel_routing.get("domainMatcher", "hybrid"),
-                    "balancers": balancers, "rules": rules},
-        "observatory": {"enableConcurrency": True, "probeInterval": "1m",
-                        "probeUrl": "https://www.gstatic.com/generate_204", "subjectSelector": ["auto_node_"]},
+        'remarks': auto_name(),
+        'meta': {'serverDescription': auto_name() if option('auto_name') else AUTO_DEFAULT_DESCRIPTION},
+        'inbounds': inbounds,
+        'outbounds': outputs,
+        'routing': {'domainStrategy': panel_routing.get('domainStrategy', 'AsIs'),
+                    'domainMatcher': panel_routing.get('domainMatcher', 'hybrid'),
+                    'balancers': balancers, 'rules': rules},
+        'observatory': {'enableConcurrency': True, 'probeInterval': rb.interval(),
+                        'probeUrl': 'https://www.gstatic.com/generate_204',
+                        'subjectSelector': ['auto_node_']},
     }
-    # DNS belongs to the panel. Preserve its DoH addresses, per-domain
-    # dispatch and fallback flags verbatim.  If the panel supplied no DNS
-    # block, let the client use its own defaults instead of inventing ours.
     panel_dns = _panel_dns(base + (extra if has_reserve and extra else []))
     if panel_dns is not None:
-        config["dns"] = panel_dns
+        config['dns'] = panel_dns
     return config
 
 
@@ -626,3 +630,22 @@ def append_auto(content, primary, rest=None, has_reserve=False):
     profiles = [p for p in profiles if not is_auto_profile(p)]
     profiles.insert(0, auto)
     return json.dumps(profiles, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def set_node_membership(ident, pool, selected):
+    """Idempotent update for web UI (unlike Telegram's toggle action)."""
+    if type(selected) is not bool:
+        raise ValueError('Некорректное состояние')
+    if pool not in {b['id'] for b in rb.all_balancers()}:
+        raise ValueError('Неизвестный балансировщик')
+    with db() as con:
+        row = con.execute('SELECT pools FROM smart_nodes WHERE id=?', (ident,)).fetchone()
+        if not row:
+            raise ValueError('Инбаунд не найден')
+        pools = json.loads(row[0])
+        if selected and pool not in pools:
+            pools.append(pool)
+        if not selected:
+            pools = [p for p in pools if p != pool]
+        con.execute('UPDATE smart_nodes SET pools=? WHERE id=?', (json.dumps(pools), ident))
+    return pools

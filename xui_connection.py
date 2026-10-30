@@ -49,9 +49,25 @@ async def get_inbounds_options():
                 "id": x.get("id"),
                 "remark": x.get("remark", ""),
                 "protocol": x.get("protocol", ""),
+                "enable": x.get("enable"),
             }
             for x in data.get("obj") or []
         ]
+
+
+async def get_inbounds_enabled_map():
+    """Authoritative enabled flags from the full 3x-ui inbound list.
+
+    The /options endpoint can omit the enable field, so it cannot on its
+    own establish whether an inbound is actually available to customers.
+    """
+    data = await _request("GET", "/panel/api/inbounds/list")
+    result = {}
+    for inbound in data.get("obj") or []:
+        if inbound.get("id") is None:
+            continue
+        result[str(inbound["id"])] = inbound.get("enable") is True
+    return result
 
 
 async def create_client(client: dict, inbound_ids: list[int]):

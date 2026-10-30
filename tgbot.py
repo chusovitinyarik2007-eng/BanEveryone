@@ -46,6 +46,29 @@ async def start(message: Message):
     if not is_admin(message.from_user.id):
         await message.answer("Нет доступа.")
         return
+    # Telegram deep-link from browser login: admin must explicitly approve.
+    argument = (message.text or '').partition(' ')[2].strip()
+    if argument.startswith('adm_'):
+        import admin_auth
+        ident = argument[4:]
+        item = admin_auth.challenge_info(ident)
+        if message.chat.type != 'private' or message.chat.id != message.from_user.id:
+            await message.answer('Подтвердите вход только в личном чате с ботом.')
+        elif not item:
+            await message.answer('Запрос входа истёк или уже обработан. Откройте сайт заново.')
+        else:
+            kb = InlineKeyboardBuilder()
+            kb.button(text='✅ Подтвердить вход', callback_data='adminweb:yes:' + ident)
+            kb.button(text='🚫 Отклонить', callback_data='adminweb:no:' + ident)
+            kb.adjust(1)
+            await message.answer('🔐 <b>Вход в веб-панель AUTO</b>\n'
+                                 f'Код для сверки с браузером: <code>{item["code"]}</code>\n'
+                                 f'Время: {item["created"]}\n'
+                                 f'IP: <code>{_escape_auto(item["ip"])}</code>\n\n'
+                                 'Подтверждайте только запрос, который вы начали сами. '
+                                 'Сессия действует 6 часов.',
+                                 reply_markup=kb.as_markup(), parse_mode='HTML')
+        return
     await message.answer("Команды:\n"
                          "<code>/auto</code> - настройка умной маршрутизации AUTO\n"
                          "<code>/info</code> - информация о пользователе\n"
@@ -57,6 +80,7 @@ async def start(message: Message):
                          "<code>/restadd</code> &lt;number&gt; - добавить подключение с огруничением\n"
                          "<code>/restshow</code> - показать подключения с ограничениями\n"
                          "<code>/setgb</code> &lt;number&gt; задать базовое ограничение гб\n"
+                         "<code>/trialdays</code> [1–365] - срок пробной подписки в днях\n"
                          "<code>/prices</code> - показать цены подписок\n"
                          "<code>/setprices</code> &lt;base&gt; &lt;full&gt; - изменить цену без/с Антиглушилкой\n"
                          "<code>/discount</code> &lt;tg_id&gt; &lt;permanent|temporary&gt; &lt;рубли&gt; - скидка на продление\n"
@@ -68,6 +92,28 @@ async def start(message: Message):
                          "<code>/rmdevice</code> uuid &lt;hwid1, hwid2, ...&gt;",
                          parse_mode="HTML"
                          )
+
+@dp.callback_query(F.data.startswith('adminweb:'))
+async def web_login_callback(callback: CallbackQuery):
+    import admin_auth
+    if (not is_admin(callback.from_user.id) or not callback.message
+            or callback.message.chat.type != 'private'
+            or callback.message.chat.id != callback.from_user.id):
+        await callback.answer('Нет доступа', show_alert=True)
+        return
+    parts = (callback.data or '').split(':', 2)
+    if len(parts) != 3 or parts[1] not in ('yes', 'no'):
+        await callback.answer('Некорректный запрос', show_alert=True)
+        return
+    ok = admin_auth.decision(parts[2], callback.from_user.id, parts[1] == 'yes')
+    if not ok:
+        await callback.answer('Запрос уже обработан или истёк', show_alert=True)
+        return
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer('✅ Вход подтверждён. Вернитесь в браузер.' if parts[1] == 'yes'
+                                  else '🚫 Запрос входа отклонён.')
+    await callback.answer()
+
 
 @dp.message(Command("info"))
 async def info(message: Message, command: CommandObject):
@@ -252,6 +298,32 @@ async def setgb(message: Message, command: CommandObject):
     settings["base_gb"] = gb * 1024**3
     db_driver.update_settings()
     await message.answer(f"Настройки изменены. Базовый лимит трафика: {gb} ГБ.")
+
+@dp.message(Command("trialdays"))
+async def trialdays(message: Message, command: CommandObject):
+    if not is_admin(message.from_user.id):
+        return
+    if not command.args or not command.args.strip():
+        await message.answer(
+            f"🎁 Срок пробной подписки: {int(settings.get('trial_days', 3))} дн.\n"
+            "Для изменения: /trialdays 3 (от 1 до 365 дней).\n"
+            "Изменение действует только для новых пробных подписок."
+        )
+        return
+    try:
+        raw = command.args.strip()
+        if not raw.isdecimal():
+            raise ValueError
+        days = int(raw)
+        if not 1 <= days <= 365:
+            raise ValueError
+    except ValueError:
+        await message.answer("Укажи целое число от 1 до 365. Пример: /trialdays 7")
+        return
+    settings['trial_days'] = days
+    db_driver.update_settings()
+    await message.answer(f"✅ Пробный период: {days} дн. Новые ключи будут выдаваться на этот срок.")
+
 
 @dp.message(Command("prices"))
 async def prices(message: Message):
@@ -812,6 +884,7 @@ async def approve_subscription_request(callback: CallbackQuery):
 
 # --------------------- AUTO / JSON routing (admin only) ---------------------
 import smart_routing
+import routing_balancers as rb
 import auto_rule_input
 from html import escape as _escape_auto
 
@@ -819,6 +892,13 @@ from html import escape as _escape_auto
 class AutoRulesState(StatesGroup):
     waiting_rules = State()
     waiting_auto_name = State()
+
+
+class AutoBalancerState(StatesGroup):
+    waiting_new_name = State()
+    waiting_interval = State()
+    waiting_name = State()
+    waiting_priority = State()
 
 
 # aiogram handles multiple updates concurrently by default. Serialize changes
@@ -848,12 +928,10 @@ def _auto_keyboard(items, width=2):
 
 def _auto_home():
     switches = [(f"{'✅' if smart_routing.enabled() else '❌'} AUTO", "auto:master")]
-    switches.extend((f"{'✅' if smart_routing.pool_enabled(p) else '❌'} {name}", f"auto:switch:{p}")
-                    for p, name in smart_routing.POOL_NAMES.items())
-    switches.extend([("🗂 Настроить балансировщики", "auto:pools"),
+    switches.extend([("🗂 Балансировщики", "auto2:list"),
+                     (f"⏱ Проверка: {rb.interval()}", "auto2:interval"),
                      ("✏️ Название AUTO", "auto:rename"),
-                     ("📝 RU-сайты → DIRECT", "auto:rules:ru"),
-                     ("📝 Домены Gemini", "auto:rules:gemini"),
+                     ("🌐 Веб-панель AUTO", "auto:web"),
                      ("🔄 Обновить", "auto:home")])
     return _auto_keyboard(switches, 2)
 
@@ -873,10 +951,7 @@ def _page_controls(entries, pool, page):
     page = max(0, min(page, pages - 1))
     buttons = []
     for n in entries[page * per_page:(page+1)*per_page]:
-        # The All pool implicitly includes nodes configured in the other
-        # primary pools. A direct membership stays independently editable.
-        inherited = pool == "all" and bool(set(n['pools']) & {"gemini", "other"})
-        mark = "✅" if pool in n['pools'] else "🔗" if inherited else "▫️"
+        mark = "✅" if pool in n['pools'] else "▫️"
         buttons.append((f"{mark} {n['name'][:38]} [{n['id'].split(':')[-1]}]",
                         f"auto:toggle:{pool}:{n['id'].split(':')[-1]}:{page}"))
     if page > 0:
@@ -892,9 +967,8 @@ async def auto_menu(message: Message):
     if not is_admin(message.from_user.id):
         return
     await message.answer("🔀 <b>AUTO · настройка JSON-подписки</b>\n"
-                         "Gemini → Все серверы, Все сайты → Все серверы, "
-                         "Все серверы → Антиглушилка (если доступна).\n"
-                         "RU-сайты всегда идут в DIRECT по списку правил из бота.\n"
+                         "Создавайте балансировщики с правилами, стратегией и fallback.\n"
+                         "Старые RU-правила DIRECT сохранены; редактируются в веб-панели.\n"
                          "Пулы выбираются из инбаундов панели; отсутствующие узлы игнорируются.",
                          reply_markup=_auto_home(), parse_mode="HTML")
 
@@ -926,6 +1000,14 @@ async def auto_callbacks(callback: CallbackQuery, state: FSMContext):
             else:
                 await _auto_finish_rules(callback.message, state, draft)
         return
+    if action == 'web':
+        admin_url = os.getenv('ADMIN_PUBLIC_URL',
+              'https://' + str(settings['HOST']).strip('/') + '/' + settings['sub'].strip('/') + '/adm')
+        await callback.answer()
+        await callback.message.answer('🌐 Откройте веб-панель AUTO:\n'
+                                      + _escape_auto(admin_url) + '\n'
+                                      'Доступ после подтверждения входа в этом боте.')
+        return
     if action == "master":
         smart_routing.set_option("enabled", not smart_routing.enabled())
     elif action == "switch" and len(data) == 3 and data[2] in smart_routing.POOL_NAMES:
@@ -954,16 +1036,17 @@ async def auto_callbacks(callback: CallbackQuery, state: FSMContext):
             "<code>/cancel</code> — отмена.\n\n"
             "Инбаунды в панели 3x-ui не изменяются.", parse_mode="HTML")
         return
-    elif action == "edit" and len(data) == 3 and data[2] in ("ru", "gemini"):
+    elif action == "edit" and len(data) == 3 and (data[2] == "ru" or rb.get(data[2])):
         token = secrets.token_hex(5)
         async with _rule_lock(callback.from_user.id):
             await state.set_state(AutoRulesState.waiting_rules)
             await state.set_data({"auto_pool": data[2], "auto_rule_parts": [],
                                   "auto_rule_token": token})
-        rules = smart_routing.pool_rules(data[2])
+        rules = (smart_routing.pool_rules('ru') if data[2] == 'ru' else rb.get(data[2])['rules'])
+        label = 'RU-сайты → DIRECT' if data[2] == 'ru' else rb.get(data[2])['name']
         await callback.answer()
         await callback.message.answer(
-            f"📝 Изменение правил <b>{'RU-сайты → DIRECT' if data[2] == 'ru' else 'Gemini'}</b>\n"
+            f"📝 Изменение правил <b>{_escape_auto(label)}</b>\n"
             "Отправляйте правила Xray, по одному в строке, <b>сколькими угодно сообщениями</b>.\n"
             "Пример: <code>domain:example.ru</code>\n"
             "Все части накапливаются; до подтверждения текущие правила не меняются.\n"
@@ -1016,15 +1099,22 @@ async def auto_callbacks(callback: CallbackQuery, state: FSMContext):
 async def _auto_finish_rules(reply_message: Message, state: FSMContext, data: dict):
     """Commit only a complete, validated draft; keep old rules on any error."""
     pool = data.get("auto_pool")
-    if pool not in ("ru", "gemini"):
-        await reply_message.answer("Пул не выбран. Откройте /auto заново.")
+    if pool != 'ru' and not rb.get(pool):
+        await reply_message.answer("Балансировщик не найден. Откройте /auto заново.")
         return
     try:
         rules = auto_rule_input.parse_rules(data.get("auto_rule_parts", []))
     except auto_rule_input.RuleInputError as exc:
         await reply_message.answer(str(exc))
         return
-    smart_routing.set_option("rules_" + pool, rules)
+    try:
+        if pool == 'ru':
+            smart_routing.set_option('rules_ru', rules)
+        else:
+            rb.update(pool, rules=rules)
+    except ValueError as exc:
+        await reply_message.answer(str(exc))
+        return
     await state.clear()
     await reply_message.answer(f"✅ Все правила {pool} сохранены: {len(rules)}. "
                                "Следующее обновление AUTO применит новый список.",
@@ -1070,8 +1160,8 @@ async def auto_collect_rules(message: Message, state: FSMContext):
         return
     async with _rule_lock(message.from_user.id):
         data = await state.get_data()
-        if data.get("auto_pool") not in ("ru", "gemini"):
-            await message.answer("Пул не выбран. Откройте /auto заново.")
+        if data.get('auto_pool') != 'ru' and not rb.get(data.get('auto_pool')):
+            await message.answer("Балансировщик не найден. Откройте /auto заново.")
             return
         parts = data.get("auto_rule_parts", [])
         try:
@@ -1112,3 +1202,239 @@ async def auto_save_auto_name(message: Message, state: FSMContext):
         "Остальные подключения панели 3x-ui не изменены. "
         "Новое имя появится при следующем обновлении JSON-подписки в клиенте.",
         reply_markup=_auto_home(), parse_mode="HTML")
+
+# ---------------- Dynamic balancers: in-bot CRUD and routing -----------------
+
+def _balancer_list_keyboard():
+    buttons = []
+    for b in rb.all_balancers():
+        icon = '✅' if b['enabled'] else '⏸'
+        extra = ' 🛟' if b['scope'] == 'reserve' else ''
+        buttons.append((f"{icon} {b['name'][:44]}{extra}", f"auto2:open:{b['id']}"))
+    buttons.extend([('➕ Создать обычный', 'auto2:new:main'),
+                    ('➕ Создать резервный', 'auto2:new:reserve'),
+                    ('⏱ Частота проверок', 'auto2:interval'),
+                    ('◀️ Назад', 'auto:home')])
+    return _auto_keyboard(buttons, 1)
+
+
+def _balancer_detail_keyboard(b):
+    bid = b['id']
+    return _auto_keyboard([
+        ('🖧 Серверы', f'auto2:nodes:{bid}:0'),
+        ('📝 Правила', f'auto:edit:{bid}'),
+        ('🔀 Стратегия', f'auto2:strategies:{bid}'),
+        ('↪️ Fallback', f'auto2:falloptions:{bid}'),
+        (f"{'✅' if b['enabled'] else '⏸'} Включён", f'auto2:enabled:{bid}'),
+        (f"⬆️ Выше (−5) · {b['priority']}", f'auto2:up:{bid}'),
+        ('⬇️ Ниже (+5)', f'auto2:down:{bid}'),
+        ('🔢 Задать число приоритета', f'auto2:priority:{bid}'),
+        ('✏️ Переименовать', f'auto2:rename:{bid}'),
+        ('🔃 Основной / резервный', f'auto2:scope:{bid}'),
+        *([('🗑 Удалить', f'auto2:confirmdelete:{bid}')]
+          if bid.startswith('custom_') else []),
+        ('◀️ Все балансировщики', 'auto2:list')
+    ], 2)
+
+
+async def _balancer_show(callback, ident):
+    b = rb.get(ident)
+    if not b:
+        await callback.answer('Балансировщик удалён', show_alert=True)
+        return
+    fb = rb.get(b['fallback'])
+    fallback = fb['name'] if fb else {'direct': 'DIRECT', 'block': 'BLOCK', 'none': 'BLOCK'}.get(b['fallback'], b['fallback'])
+    label = ('🛟 Только --rest' if b['scope'] == 'reserve' else '🌐 Обычные подключения')
+    await _auto_render(callback,
+        f"🔀 <b>{_escape_auto(b['name'])}</b>\n"
+        f"ID: <code>{b['id']}</code>\n"
+        f"Серверы: {label}\n"
+        f"Стратегия: <code>{b['strategy']}</code>\n"
+        f"Fallback: {_escape_auto(fallback)}\n"
+        f"Правил: {len(b['rules'])} · Приоритет: {b['priority']}\n"
+        f"Назначенные подключения используются только этим пулом.\n\n"
+        "Правила панели DIRECT/BLOCK всегда выше этих правил.", _balancer_detail_keyboard(b))
+
+
+def _dynamic_node_controls(entries, pool, page):
+    per_page = 10
+    pages = max(1, (len(entries) + per_page - 1) // per_page)
+    page = max(0, min(page, pages - 1))
+    buttons = []
+    for n in entries[page * per_page:(page + 1) * per_page]:
+        status = '✅' if pool in n['pools'] else '▫️'
+        buttons.append((f"{status} {n['name'][:36]} [{n['id'].split(':')[-1]}]",
+                        f"auto2:toggle:{pool}:{n['id'].split(':')[-1]}:{page}"))
+    if page > 0:
+        buttons.append(('⬅️', f'auto2:nodes:{pool}:{page-1}'))
+    if page < pages - 1:
+        buttons.append(('➡️', f'auto2:nodes:{pool}:{page+1}'))
+    buttons.append(('◀️ К балансировщику', f'auto2:open:{pool}'))
+    return _auto_keyboard(buttons, 1), page, pages
+
+
+@dp.callback_query(F.data.startswith('auto2:'))
+async def auto_dynamic_callbacks(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer('Нет доступа', show_alert=True)
+        return
+    items = callback.data.split(':')
+    action = items[1]
+    ident = items[2] if len(items) > 2 else ''
+    if action == 'list':
+        await _auto_render(callback,
+            '🗂 <b>Балансировщики AUTO</b>\n'
+            'Можно создавать новые, выбирать правила, инбаунды, стратегию и fallback.\n'
+            f'Опрос серверов — общий для AUTO: {rb.interval()}.',
+            _balancer_list_keyboard())
+    elif action == 'open':
+        await _balancer_show(callback, ident)
+    elif action in ('new', 'rename'):
+        if action == 'new' and ident not in rb.SCOPES:
+            await callback.answer('Неверная группа серверов', show_alert=True)
+            return
+        if action == 'rename' and not rb.get(ident):
+            await callback.answer('Пул не найден', show_alert=True)
+            return
+        await state.set_state(AutoBalancerState.waiting_new_name if action == 'new' else AutoBalancerState.waiting_name)
+        await state.set_data({'auto_scope': ident} if action == 'new' else {'auto_id': ident})
+        await callback.message.answer('Отправьте название балансировщика (1–70 символов). /cancel — отмена.')
+    elif action == 'priority' and rb.get(ident):
+        await state.set_state(AutoBalancerState.waiting_priority)
+        await state.set_data({'auto_id': ident})
+        await callback.message.answer('🔢 Укажи приоритет от -100000 до 100000.\n'
+                                     'Чем меньше число, тем раньше проверяются правила.\n'
+                                     '/cancel — отмена.')
+    elif action == 'interval':
+        await state.set_state(AutoBalancerState.waiting_interval)
+        await callback.message.answer('⏱ Частота проверки серверов общая для всех пулов.\n'
+                                      f'Сейчас: {rb.interval()}.\n'
+                                      'Укажите от 10s до 1h, например 30s, 1m или 5m.\n'
+                                      '/cancel — отмена.')
+    elif action == 'nodes' and len(items) == 4 and rb.get(ident):
+        try:
+            entries = await _panel_auto_nodes()
+        except Exception as exc:
+            await callback.answer(f'Не удалось получить инбаунды: {str(exc)[:90]}', show_alert=True)
+            return
+        keyboard, page, pages = _dynamic_node_controls(entries, ident, int(items[3]) if items[3].isdigit() else 0)
+        await _auto_render(callback, f'🖧 <b>{_escape_auto(rb.get(ident)["name"])}</b>\n'
+                           f'Инбаундов: {len(entries)}, страница {page+1}/{pages}\n'
+                           '✅ Назначен · ▫️ Не назначен · 🔗 унаследован старым пулом «Все серверы».', keyboard)
+    elif action == 'toggle' and len(items) == 5 and rb.get(ident):
+        try:
+            entries = await _panel_auto_nodes()
+            panel_id = smart_routing.panel_key(items[3])
+            if not any(node['id'] == panel_id for node in entries):
+                raise ValueError('Инбаунд отсутствует в панели')
+            smart_routing.toggle_node(panel_id, ident)
+            await callback.answer('✅ Состав обновлён')
+        except (ValueError, RuntimeError) as exc:
+            await callback.answer(str(exc)[:160], show_alert=True)
+            return
+        keyboard, page, pages = _dynamic_node_controls(entries, ident, int(items[4]) if items[4].isdigit() else 0)
+        await _auto_render(callback, f'🖧 <b>{_escape_auto(rb.get(ident)["name"])}</b> · {page+1}/{pages}', keyboard)
+        return
+    elif action == 'strategies' and rb.get(ident):
+        b = rb.get(ident)
+        await _auto_render(callback, '🔀 <b>Стратегия выбора сервера</b>\n'
+                           'leastPing / leastLoad требуют observatory.\n'
+                           'random и roundRobin также учитывают доступность при активном observatory.',
+                           _auto_keyboard([(f"{'✅' if b['strategy']==st else '▫️'} {st}", f'auto2:strategy:{ident}:{st}')
+                                           for st in rb.STRATEGIES] + [('◀️ Назад', f'auto2:open:{ident}')], 1))
+    elif action == 'falloptions' and rb.get(ident):
+        b = rb.get(ident)
+        choices = [('🚫 BLOCK', f'auto2:fall:{ident}:block'),
+                   ('🌐 DIRECT', f'auto2:fall:{ident}:direct')]
+        for other in rb.all_balancers():
+            if other['id'] != ident:
+                choices.append((f"{'✅ ' if other['id']==b['fallback'] else ''}↪️ {other['name'][:38]}",
+                                f"auto2:fall:{ident}:{other['id']}"))
+        choices.append(('◀️ Назад', f'auto2:open:{ident}'))
+        await _auto_render(callback, f'↪️ <b>Fallback для {_escape_auto(b["name"])}</b>\n'
+                           'Проверка циклов выполняется до сохранения.', _auto_keyboard(choices, 1))
+    elif action == 'confirmdelete' and ident.startswith('custom_') and rb.get(ident):
+        await _auto_render(callback, '⚠️ Удалить балансировщик и его назначения?\n'
+                           'Сам инбаунд панели останется без изменений.',
+                           _auto_keyboard([('🗑 Подтверждаю удаление', f'auto2:delete:{ident}'),
+                                           ('❌ Отмена', f'auto2:open:{ident}')], 1))
+    elif action in ('enabled', 'default', 'up', 'down', 'scope', 'strategy', 'fall', 'delete') and rb.get(ident):
+        try:
+            b = rb.get(ident)
+            if action == 'enabled':
+                rb.update(ident, enabled=not b['enabled'])
+            elif action == 'default':
+                if b['scope'] != 'main':
+                    raise ValueError('Основным может быть только обычный балансировщик')
+                rb.update(ident, is_default=True)
+            elif action in ('up','down'):
+                rb.update(ident, priority=b['priority'] + (-5 if action == 'up' else 5))
+            elif action == 'scope':
+                if b['is_default']:
+                    raise ValueError('Сначала назначьте другой балансировщик основным')
+                rb.update(ident, scope='main' if b['scope'] == 'reserve' else 'reserve')
+            elif action == 'strategy' and len(items) == 4:
+                rb.update(ident, strategy=items[3])
+            elif action == 'fall' and len(items) == 4:
+                rb.update(ident, fallback=items[3])
+            elif action == 'delete':
+                rb.delete(ident)
+                await _auto_render(callback, '✅ Балансировщик удалён', _balancer_list_keyboard())
+                await callback.answer()
+                return
+            else:
+                raise ValueError('Неизвестная настройка')
+        except ValueError as exc:
+            await callback.answer(str(exc)[:190], show_alert=True)
+            return
+        await _balancer_show(callback, ident)
+    else:
+        await callback.answer('Действие устарело. Откройте /auto заново.', show_alert=True)
+        return
+    await callback.answer()
+
+
+@dp.message(Command('cancel'), AutoBalancerState.waiting_new_name)
+@dp.message(Command('cancel'), AutoBalancerState.waiting_name)
+@dp.message(Command('cancel'), AutoBalancerState.waiting_interval)
+@dp.message(Command('cancel'), AutoBalancerState.waiting_priority)
+async def auto_dynamic_cancel(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    await state.clear()
+    await message.answer('Отменено, ничего не изменено.', reply_markup=_auto_home())
+
+
+@dp.message(AutoBalancerState.waiting_new_name)
+@dp.message(AutoBalancerState.waiting_name)
+@dp.message(AutoBalancerState.waiting_interval)
+@dp.message(AutoBalancerState.waiting_priority)
+async def auto_dynamic_text(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    mode = await state.get_state()
+    data = await state.get_data()
+    value = (message.text or '').strip()
+    try:
+        if mode == AutoBalancerState.waiting_new_name.state:
+            ident = rb.create(value, data.get('auto_scope', 'main'))
+            text = f'✅ Создан балансировщик «{rb.get(ident)["name"]}» (ID {ident}).\nНазначьте серверы и правила.'
+        elif mode == AutoBalancerState.waiting_name.state:
+            ident = data.get('auto_id')
+            rb.update(ident, name=value)
+            text = f'✅ Название изменено: {rb.get(ident)["name"]}'
+        elif mode == AutoBalancerState.waiting_interval.state:
+            rb.set_interval(value)
+            text = f'✅ Новый интервал опроса: {rb.interval()}'
+        elif mode == AutoBalancerState.waiting_priority.state:
+            if not value.lstrip('-').isdigit():
+                raise ValueError('Приоритет должен быть целым числом')
+            rb.update(data.get('auto_id'), priority=int(value))
+            text = f'✅ Приоритет: {rb.get(data.get("auto_id"))["priority"]}'
+        else:
+            return
+    except ValueError as exc:
+        await message.answer(_escape_auto(str(exc)))
+        return
+    await state.clear()
+    await message.answer(_escape_auto(text), reply_markup=_auto_home())

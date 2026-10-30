@@ -38,7 +38,8 @@ def_sett = {
     "CLEAR_TRASH" : clear_trash,
     "cost_per_month_full" : 200,
     "cost_per_month_base" : 150,
-    "alert_days" : [1, 3]
+    "alert_days" : [1, 3],
+    "trial_days": 3
 }
 most_important = {
     "sub" : sub,

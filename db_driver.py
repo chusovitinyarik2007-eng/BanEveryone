@@ -82,6 +82,18 @@ def init_db():
             )
         ''')
 
+        cur.execute("""CREATE TABLE IF NOT EXISTS trial_claims (
+            tg_id INTEGER PRIMARY KEY,
+            status TEXT NOT NULL CHECK(status IN ('creating','claimed')),
+            sub_id TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS bot_visitors (
+            tg_id INTEGER PRIMARY KEY,
+            first_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            trial_eligible INTEGER NOT NULL DEFAULT 0
+        )""")
+
         for key, val in def_sett.items():
             cur.execute(
                 "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
@@ -616,5 +628,55 @@ def has_active_request(tg_id: int, request_type: str) -> bool:
             (int(tg_id), str(request_type)),
         ).fetchone()
         return bool(row)
+    finally:
+        db.close()
+
+
+def register_bot_visitor(tg_id: int) -> bool:
+    """Only a first-ever visitor with no local subscriptions may claim a trial."""
+    db = _connect()
+    try:
+        with db:
+            db.execute("INSERT OR IGNORE INTO bot_visitors(tg_id, trial_eligible) "
+                       "SELECT ?, CASE WHEN NOT EXISTS (SELECT 1 FROM Users WHERE tg_id=?) "
+                       "AND NOT EXISTS (SELECT 1 FROM trial_claims WHERE tg_id=?) THEN 1 ELSE 0 END",
+                       (int(tg_id), int(tg_id), int(tg_id)))
+        return trial_available(tg_id)
+    finally:
+        db.close()
+
+
+def trial_available(tg_id: int) -> bool:
+    db = _connect()
+    try:
+        row = db.execute("SELECT trial_eligible FROM bot_visitors WHERE tg_id=?", (int(tg_id),)).fetchone()
+        return bool(row and row[0] and not db.execute(
+            "SELECT 1 FROM trial_claims WHERE tg_id=?", (int(tg_id),)).fetchone()
+            and not db.execute("SELECT 1 FROM Users WHERE tg_id=?", (int(tg_id),)).fetchone())
+    finally:
+        db.close()
+
+
+def reserve_trial(tg_id: int) -> bool:
+    db = sqlite3.connect(_db_path(), timeout=15)
+    try:
+        db.execute('BEGIN IMMEDIATE')
+        eligible = db.execute('SELECT trial_eligible FROM bot_visitors WHERE tg_id=?', (int(tg_id),)).fetchone()
+        if not eligible or not eligible[0] or db.execute('SELECT 1 FROM Users WHERE tg_id=?', (int(tg_id),)).fetchone():
+            db.rollback(); return False
+        cursor = db.execute("INSERT OR IGNORE INTO trial_claims(tg_id,status) VALUES (?,'creating')", (int(tg_id),))
+        db.commit()
+        return cursor.rowcount == 1
+    finally:
+        db.close()
+
+
+def finish_trial(tg_id: int, sub_id: str):
+    db = _connect()
+    try:
+        with db:
+            db.execute("UPDATE trial_claims SET status='claimed',sub_id=? WHERE tg_id=? AND status='creating'",
+                       (str(sub_id), int(tg_id)))
+            db.execute('UPDATE bot_visitors SET trial_eligible=0 WHERE tg_id=?', (int(tg_id),))
     finally:
         db.close()

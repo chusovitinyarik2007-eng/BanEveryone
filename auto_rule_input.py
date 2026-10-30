@@ -7,7 +7,7 @@ an explicit confirmation in the service bot.
 
 import re
 
-RULE_PREFIXES = ("domain:", "full:", "regexp:", "geosite:")
+RULE_PREFIXES = ("domain:", "full:", "regexp:", "geosite:", "keyword:", "ip:", "geoip:")
 MAX_RULES = 10_000
 MAX_RULE_LENGTH = 512
 MAX_DRAFT_CHARS = 6_000_000
@@ -45,7 +45,7 @@ def _likely_complete_rule(last_line):
         return (bool(re.fullmatch(r"[a-zA-Z0-9*_.-]+", name))
                 and not re.search(r"\.[a-zA-Z]$", name)
                 and not re.search(r"\.[a-zA-Z0-9]*-$", name))
-    if value.startswith(("full:", "regexp:", "geosite:")):
+    if value.startswith(("full:", "regexp:", "geosite:", "keyword:", "ip:", "geoip:")):
         return len(value.split(":", 1)[1]) > 0
     return False
 

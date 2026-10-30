@@ -19,8 +19,12 @@ def _nav(back_callback=None):
     return row
 
 
-def get_main_inline_keyboard():
-    return _markup([[('🔑 Мои ключи', 'my_keys')]])
+def get_main_inline_keyboard(trial=False):
+    rows = [[('🔑 Мои ключи', 'my_keys')]]
+    if trial:
+        from classes import settings
+        rows.insert(0, [(f'🎁 Пробный период — {int(settings.get("trial_days", 3))} дн.', 'trial:claim')])
+    return _markup(rows)
 
 
 def get_home_keyboard():

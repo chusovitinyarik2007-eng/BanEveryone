@@ -15,12 +15,27 @@ from limited_inbounds import user_check_inbounds_rest, update_users_rest
 import base64
 import json
 import smart_routing
+from subscription_clients import classify, NO_CACHE
 import xui_connection
 import userBot.bot as userbot
 
 app = FastAPI()
 BASE_DIR = Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "web_subscription" / "static")), name="static")
+# Admin router must precede the generic subscription /{uuid} route.
+import admin_web
+app.include_router(admin_web.router, prefix="/" + settings["sub"].strip("/") + "/adm")
+
+@app.middleware("http")
+async def admin_response_headers(request: Request, call_next):
+    response = await call_next(request)
+    base = "/" + settings["sub"].strip("/") + "/adm"
+    if request.url.path == base or request.url.path.startswith(base + "/"):
+        for key, value in admin_web.HEADERS.items():
+            response.headers[key] = value
+        response.headers["Strict-Transport-Security"] = "max-age=31536000"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    return response
 DENIED_LINK = (
     "vless://00000000-0000-0000-0000-000000000001@127.0.0.1:443"
     "?encryption=none&security=none&type=tcp#Подписка%20уже%20активирована\n"
@@ -60,8 +75,22 @@ async def get_sub(request: Request):
     import tgbot
     import xui_connection
     uuid = str(request.path_params.get('uuid') or '').strip()
-    if is_browser(request):
-        return await send_sub_page(request, settings["vpn_name"], uuid)
+    client_type = ('browser' if request.query_params.get('view') == 'web'
+                   else classify(request.headers))
+    if client_type == 'browser':
+        if not db_driver.is_user_exist(uuid):
+            return Response('<!doctype html><html lang="ru"><meta charset="utf-8">'
+                            '<title>Подписка не найдена</title><h1>Подписка не найдена</h1></html>',
+                            status_code=404, media_type='text/html', headers=NO_CACHE)
+        page = await send_sub_page(request, settings["vpn_name"], uuid)
+        # Ensure that even template responses cannot be cached at the CDN.
+        if hasattr(page, 'headers'):
+            page.headers.update(NO_CACHE)
+        return page
+    if client_type == 'unsupported':
+        return Response('Клиент не поддерживается. Используйте Happ или Incy.',
+                        status_code=403, media_type='text/plain; charset=utf-8',
+                        headers=NO_CACHE)
 
     if not db_driver.is_user_exist(uuid):
         r = await xui_connection.sync_names_with_panel(uuid)
@@ -440,6 +469,7 @@ async def fetch_real_sub(
         "subscription-userinfo"
     ] = build_userinfo(info)
     out_headers["providerId"] = "EjkzYCgM"
+    out_headers.update({k.lower(): v for k, v in NO_CACHE.items()})
     return Response(
         content=content,
         status_code=resp.status_code,
@@ -452,28 +482,13 @@ def make_denied_response(info) -> Response:
         "Profile-Update-Interval": "1",
         "Subscription-Userinfo": "upload=0; download=0; total=1; expire=0",
     }
+    headers.update(NO_CACHE)
     return Response(content=info, media_type="text/plain", headers=headers)
 
 def is_browser(request: Request) -> bool:
-    accept = (request.headers.get("accept") or "").lower()
-    ua = (request.headers.get("user-agent") or "").lower()
-    hwid = request.headers.get("x-hwid") or request.headers.get("X-HWID")
+    """Backward-compatible wrapper; only document navigation is a browser."""
+    return classify(request.headers) == 'browser'
 
-    if hwid:
-        return False  # клиент VPN
-
-    vpn_ua = ("happ", "v2ray", "clash", "sing-box", "shadowrocket",
-              "nekobox", "stash", "quantumult", "surge", "loon")
-    if any(x in ua for x in vpn_ua):
-        return False
-
-    if "text/html" in accept:
-        return True
-
-    # запас: типичный браузерный UA без hwid
-    if any(x in ua for x in ("mozilla", "chrome", "safari", "firefox", "edg")):
-        return True
-    return False
 
 async def run_bot():
     import tgbot

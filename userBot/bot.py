@@ -34,6 +34,13 @@ session = AiohttpSession(proxy=PROXY_ADDRESS) if USE_PROXY else None
 bot = Bot(token=BOT_TOKEN, session=session) if session else Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+CLIENT_HELP = (
+    "📱 <b>Поддерживаются только Happ и Incy.</b>\n"
+    "Скопируйте ссылку на подписку и добавьте её в приложение Happ или Incy. "
+    "В другие VPN-приложения эту ссылку вставлять не нужно."
+)
+
+
 
 def _days_text(expiry_ms: int) -> str:
     expiry_ms = int(expiry_ms or 0)
@@ -92,7 +99,8 @@ async def get_main_text(tg_id: int):
         f"Здесь можно управлять VPN-подписками, подключёнными устройствами, "
         f"продлевать ключи и запрашивать новые.\n\n"
         f"🔑 Ваши ключи: <b>{len(users)}</b>\n\n"
-        f"❗️Если какой-то ключ не отображается, напишите администратору: @yar1k_ch"
+        f"📱 Для подключения используйте только Happ или Incy.\n\n"
+        f"Если ключ не отображается, напишите администратору: @yar1k_ch"
     )
 
 
@@ -128,10 +136,10 @@ async def get_subscription_details(user, panel=None):
 
 async def render_keys_text(users):
     if not users:
-        return "<b>Мои ключи</b> 🔑\n\nУ вас пока нет подписок."
+        return "<b>Мои ключи</b> 🔑\n\nУ вас пока нет подписок.\n\n" + CLIENT_HELP
 
     panel = await _panel_users()
-    blocks = ["<b>Мои ключи</b> 🔑"]
+    blocks = ["<b>Мои ключи</b> 🔑", CLIENT_HELP]
     for user in users:
         details = await get_subscription_details(user, panel)
         if not details["exists"]:
@@ -224,10 +232,11 @@ def _renew_back(scope: str):
 
 @dp.message(Command("start"))
 async def start(message: Message):
+    trial = db_driver.register_bot_visitor(message.from_user.id)
     await message.answer(
         await get_main_text(message.from_user.id),
         parse_mode="HTML",
-        reply_markup=get_main_inline_keyboard(),
+        reply_markup=get_main_inline_keyboard(trial),
     )
 
 
@@ -237,7 +246,45 @@ async def load_main(callback: CallbackQuery):
     await callback.message.edit_text(
         await get_main_text(callback.from_user.id),
         parse_mode="HTML",
-        reply_markup=get_main_inline_keyboard(),
+        reply_markup=get_main_inline_keyboard(db_driver.trial_available(callback.from_user.id)),
+    )
+
+
+@dp.callback_query(F.data == "trial:claim")
+async def trial_claim(callback: CallbackQuery):
+    tg_id = callback.from_user.id
+    if not db_driver.reserve_trial(tg_id):
+        await callback.answer(
+            "Бесплатная подписка уже была активирована. "
+            "Повторно получить пробный период нельзя.",
+            show_alert=True,
+        )
+        return
+    await callback.answer("Создаём пробную подписку...")
+    try:
+        from subscription_service import create_trial_subscription
+        sub_id, email, expiry = await create_trial_subscription(tg_id, callback.from_user.username)
+        db_driver.finish_trial(tg_id, sub_id)
+    except Exception:
+        import logging
+        logging.exception("Failed to provision trial for Telegram ID %s", tg_id)
+        await callback.message.edit_text(
+            "⚠️ Не удалось завершить выдачу пробной подписки.\n\n"
+            "Повторная выдача временно заблокирована, чтобы не создать два ключа. "
+            "Напишите администратору @yar1k_ch — он проверит подписку.",
+            reply_markup=get_home_keyboard(),
+        )
+        return
+    from subscription_service import public_subscription_url
+    days = int(settings.get("trial_days", 3))
+    await callback.message.edit_text(
+        f"🎁 <b>Пробная подписка активирована на {days} дн.!</b>\n\n"
+        f"Название: <b>{escape(email)}</b>\n"
+        "Доступны все обычные серверы и Антиглушилка.\n"
+        "Управлять устройствами и запрашивать продление можно в разделе «Мои ключи».\n\n"
+        f"🔗 <b>Ваша ссылка на подписку:</b>\n<code>{escape(public_subscription_url(sub_id))}</code>\n\n"
+        f"{CLIENT_HELP}",
+        parse_mode="HTML", reply_markup=get_home_keyboard(),
     )
 
 
@@ -270,7 +317,8 @@ async def key_details(callback: CallbackQuery):
         f"🔵 Тип: <b>{plan}</b>\n"
         f"⏳ Срок: <b>{escape(details['days'])}</b>\n"
         f"📱 Устройств: <b>{len(user.current_device or [])}/{user.max_device}</b>\n\n"
-        f"🔗 <b>Ссылка на подписку:</b>\n<code>{escape(details['url'])}</code>"
+        f"🔗 <b>Ссылка на подписку:</b>\n<code>{escape(details['url'])}</code>\n\n"
+        f"{CLIENT_HELP}"
     )
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=get_key_keyboard(sub_id))
 
@@ -490,7 +538,8 @@ async def new_send(callback: CallbackQuery):
     import tgbot
     await tgbot.send_subscription_request(req_id)
     await callback.message.edit_text(
-        "✅ Запрос отправлен администратору. Вы получите уведомление после решения.\n"
+        "✅ Запрос на подписку отправлен администратору.\n"
+        "Когда запрос рассмотрят, вы получите сообщение.\n"
         "Для оплаты свяжитесь с администратором: @yar1k_ch",
         reply_markup=get_home_keyboard(),
     )
@@ -588,7 +637,8 @@ async def renew_send(callback: CallbackQuery):
     import tgbot
     await tgbot.send_subscription_request(req_id)
     await callback.message.edit_text(
-        "✅ Запрос на продление отправлен администратору. Вы получите уведомление после решения.\n"
+        "✅ Запрос на продление отправлен администратору.\n"
+        "Когда запрос рассмотрят, вы получите сообщение.\n"
         "Для оплаты свяжитесь с администратором: @yar1k_ch\n\n"
         f"Стоимость: <b>{format_price(total)}</b>",
         parse_mode="HTML",

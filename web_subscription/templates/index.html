@@ -3,78 +3,118 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#0b1021">
   <title>{{ title }} — подписка</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <div class="bg"></div>
+  <div class="background" aria-hidden="true"><div class="aurora aurora-one"></div><div class="aurora aurora-two"></div><div class="aurora aurora-three"></div><div class="noise"></div></div>
+  <div class="site">
+    <header class="topbar">
+      <a href="/" class="brand" aria-label="Главная"><span class="brand-icon" aria-hidden="true">✦</span><span>{{ title }}</span></a>
+      <button class="theme-toggle" type="button" id="themeToggle" aria-label="Переключить тему" title="Переключить тему"><span class="theme-icon" aria-hidden="true">☼</span><span class="theme-label">Тема</span></button>
+    </header>
 
-  <header class="top">
-    <div class="brand">{{ title }}</div>
-    <button type="button" class="theme-btn" id="themeToggle">Тема</button>
-  </header>
+    <main>
+      <section class="hero panel {% if is_active %}is-active{% else %}is-inactive{% endif %}" aria-labelledby="page-title">
+        <div class="hero-content">
+          <div class="hero-top"><span class="overline"><span class="overline-dot"></span>Личный кабинет</span><span class="status {% if is_active %}status-active{% else %}status-inactive{% endif %}"><span class="status-dot"></span>{% if is_active %}Подписка активна{% else %}Подписка неактивна{% endif %}</span></div>
+          <h1 id="page-title">Подписка <span class="gradient-text">{{ name }}</span></h1>
+          <p class="lead">Всё о подключении в одном месте: срок действия, использование трафика и ваши серверы.</p>
+          <div class="hero-divider"></div>
+          <div class="details-grid">
+            <div class="detail"><span class="detail-icon" aria-hidden="true">◷</span><div><span class="label">Действует до</span><strong class="detail-value">{{ date_expire }}</strong><span class="detail-hint">Осталось: {{ days }} дн.</span></div></div>
+            <div class="detail"><span class="detail-icon" aria-hidden="true">▣</span><div><span class="label">Устройства</span><strong class="detail-value">{{ current_devices }} <span class="value-muted">/ {{ max_devices }}</span></strong><span class="detail-hint">Подключённые устройства</span></div></div>
+          </div>
+        </div>
+        <div class="hero-glow" aria-hidden="true"><div class="orb">✦</div><div class="orb-ring orb-ring-one"></div><div class="orb-ring orb-ring-two"></div></div>
+      </section>
 
-  <main class="wrap">
-    <!-- is_active: true/false из Python -->
-    <section class="card {% if is_active %}is-active{% else %}is-inactive{% endif %}">
-      <p class="eyebrow">Подписка</p>
-      <h1>{{ name }}</h1>
-      <p class="lead">Эта страница только для просмотра. Чтобы пользоваться VPN, добавьте ссылку в клиент.</p>
-
-      <div class="grid">
-        <div class="stat">
-          <span class="label">Конец подписки</span>
-          <span class="value">{{ date_expire }}<br> {{ days }} дн.</span>
-        </div>
-        <div class="stat">
-          <span class="label">Трафик</span>
-          <span class="value">{{ current_usage_traffic }} из {{ total_traffic }} ГБ <br>{{ additional_gb }}</span>
-        </div>
-        <div class="stat">
-          <span class="label">Устройства</span>
-          <span class="value">{{ current_devices }} из {{ max_devices }}</span>
-        </div>
-        <div class="stat">
-          <span class="label">Статус</span>
-          {% if is_active %}
-            <span class="value ok">Активна</span>
+      <div class="section-heading"><div><p class="overline">Статистика</p><h2>Использование трафика</h2></div></div>
+      <div class="traffic-layout {% if (rest_traffic is defined and rest_traffic) or (additional_gb is defined and additional_gb) %}with-reserve{% endif %}">
+        <section class="panel traffic-panel" aria-label="Основной трафик">
+          <div class="traffic-heading"><span class="traffic-symbol traffic-main-symbol" aria-hidden="true">↗</span><span class="traffic-name">Основной трафик</span></div>
+          <div class="traffic-numbers"><span class="traffic-used">{{ current_usage_traffic }} <small>ГБ</small></span><span class="traffic-total">из {{ total_traffic }} ГБ</span></div>
+          {% if total_traffic != '∞' and total_traffic != '∞ ГБ' and total_traffic is number and total_traffic > 0 %}
+            {% set main_percent = ((current_usage_traffic|float / total_traffic|float) * 100) %}
+            <div class="progress" role="progressbar" aria-label="Использовано основного трафика" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ [100, [0, main_percent]|max]|min|round|int }}"><div class="progress-fill main-fill" style="width: {{ [100, [0, main_percent]|max]|min }}%"></div></div>
+            <span class="traffic-note">{{ main_percent|round(1) }}% лимита использовано</span>
           {% else %}
-            <span class="value error">Неактивна</span>
+            <div class="progress progress-unlimited" aria-hidden="true"><div class="progress-fill main-fill"></div></div><span class="traffic-note">Без лимита трафика</span>
           {% endif %}
+        </section>
+
+        {% if rest_traffic is defined and rest_traffic %}
+        <section class="panel traffic-panel" aria-label="Трафик Антиглушилки">
+          <div class="traffic-heading"><span class="traffic-symbol traffic-reserve-symbol" aria-hidden="true">✧</span><span class="traffic-name">Антиглушилка</span></div>
+          <div class="traffic-numbers"><span class="traffic-used">{{ rest_traffic.used_gb }} <small>ГБ</small></span><span class="traffic-total">из {{ rest_traffic.total_gb }} ГБ</span></div>
+          {% if rest_traffic.total_gb is number and rest_traffic.total_gb > 0 %}
+            {% set reserve_percent = rest_traffic.used_gb|float / rest_traffic.total_gb|float * 100 %}
+            <div class="progress" role="progressbar" aria-label="Использовано трафика Антиглушилки" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ [100, [0, reserve_percent]|max]|min|round|int }}"><div class="progress-fill reserve-fill" style="width: {{ [100, [0, reserve_percent]|max]|min }}%"></div></div>
+            <span class="traffic-note">{{ reserve_percent|round(1) }}% лимита использовано</span>
+          {% else %}
+            <div class="progress progress-unlimited" aria-hidden="true"><div class="progress-fill reserve-fill"></div></div><span class="traffic-note">Без лимита трафика</span>
+          {% endif %}
+        </section>
+        {% elif additional_gb is defined and additional_gb %}
+        <section class="panel traffic-panel" aria-label="Трафик Антиглушилки"><div class="traffic-heading"><span class="traffic-symbol traffic-reserve-symbol" aria-hidden="true">✧</span><span class="traffic-name">Антиглушилка</span></div><p class="legacy-reserve">{{ additional_gb }}</p></section>
+        {% endif %}
+      </div>
+
+      {% if keys_visible is defined and keys_visible and connection_keys is defined and connection_keys %}
+      <section class="keys-section" aria-labelledby="keys-title">
+        <div class="section-heading"><div><p class="overline">Ваши подключения</p><h2 id="keys-title">Ключи серверов</h2></div><span class="heading-caption">{{ connection_keys|length }} подключений</span></div>
+        <div class="keys-list">
+          {% for item in connection_keys %}
+          <article class="key-row panel">
+            <div class="key-icon" aria-hidden="true">⌘</div>
+            <div class="key-info"><strong class="key-name">{{ item.name }}</strong><div class="key-tags"><span class="protocol-tag">{{ item.protocol|upper }}</span><span class="transport-tag transport-{{ (item.transport or 'tcp')|lower|replace('+', '-')|replace(' ', '-')|replace('/', '-') }}">{{ item.transport|upper if item.transport else 'TCP' }}</span>{% if item.is_reserve is defined and item.is_reserve %}<span class="reserve-tag">Антиглушилка</span>{% endif %}</div></div>
+            <button class="copy-btn" type="button" data-copy="{{ item.uri }}" aria-label="Скопировать ключ {{ item.name }}"><span class="copy-symbol" aria-hidden="true">⧉</span><span class="copy-label">Копировать</span></button>
+          </article>
+          {% endfor %}
         </div>
-      </div>
+        <p class="keys-disclaimer">Не передавайте ключи посторонним. Каждый ключ даёт доступ к подключению.</p>
+      </section>
+      {% endif %}
 
-      <div class="row">
-        <span class="label">ID</span>
-        <code class="uuid">{{ uuid }}</code>
-      </div>
-
-      <a class="support-btn" href="https://t.me/yar1k_ch" target="_blank" rel="noopener noreferrer">
-        Написать в поддержку
-      </a>
-    </section>
-  </main>
-
+      <section class="bottom-panel panel"><div><p class="overline">Помощь и поддержка</p><h2>Нужна помощь с подключением?</h2><p class="bottom-desc">Напишите нам — поможем разобраться с настройками.</p></div><a class="support-btn" href="https://t.me/yar1k_ch" target="_blank" rel="noopener noreferrer"><span>Связаться с поддержкой</span><span aria-hidden="true">↗</span></a></section>
+    </main>
+    <footer class="footer"><span>Ваше подключение — под контролем</span></footer>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
   <script>
   (function () {
+    'use strict';
     var root = document.documentElement;
-    var key = "theme";
-
-    function apply(theme) {
-      root.setAttribute("data-theme", theme);
-      try { localStorage.setItem(key, theme); } catch (e) {}
+    var toggle = document.getElementById('themeToggle');
+    var toast = document.getElementById('toast');
+    var toastTimeout;
+    try { var theme = localStorage.getItem('subscription-theme'); if (theme === 'dark' || theme === 'light') root.setAttribute('data-theme', theme); } catch (e) {}
+    function syncTheme() { toggle.setAttribute('aria-label', root.getAttribute('data-theme') === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему'); }
+    syncTheme();
+    toggle.addEventListener('click', function () {
+      var next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+      root.setAttribute('data-theme', next);
+      try { localStorage.setItem('subscription-theme', next); } catch (e) {}
+      syncTheme();
+    });
+    function notify(message) { toast.textContent = message; toast.classList.add('visible'); clearTimeout(toastTimeout); toastTimeout = setTimeout(function () { toast.classList.remove('visible'); }, 2500); }
+    async function copyText(text) {
+      if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return; }
+      var area = document.createElement('textarea'); area.value = text; area.setAttribute('readonly', ''); area.style.position = 'fixed'; area.style.left = '-9999px'; document.body.appendChild(area); area.select();
+      var ok = document.execCommand('copy'); document.body.removeChild(area);
+      if (!ok) throw new Error('Copy failed');
     }
-
-    try {
-      var saved = localStorage.getItem(key);
-      if (saved === "light" || saved === "dark") apply(saved);
-    } catch (e) {}
-
-    document.addEventListener("click", function (e) {
-      var btn = e.target.closest("#themeToggle");
+    document.addEventListener('click', function (event) {
+      var btn = event.target.closest('.copy-btn');
       if (!btn) return;
-      var now = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
-      apply(now);
+      copyText(btn.getAttribute('data-copy') || '').then(function () {
+        notify('Ключ скопирован');
+        var label = btn.querySelector('.copy-label'); if (!label) return;
+        label.textContent = 'Скопировано'; btn.classList.add('copied');
+        setTimeout(function () { label.textContent = 'Копировать'; btn.classList.remove('copied'); }, 1800);
+      }).catch(function () { notify('Не удалось скопировать ключ'); });
     });
   })();
   </script>

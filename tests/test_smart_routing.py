@@ -81,7 +81,7 @@ class AutoRoutingTests(unittest.TestCase):
         self.assertIn(n2, lb['auto_lb_other'])
         self.assertIn(n3, lb['auto_lb_gemini'])
         self.assertIn(n3, lb['auto_lb_other'])
-        self.assertEqual(len(lb['auto_lb_all']), 4)
+        self.assertEqual(len(lb['auto_lb_all']), 2)
         self.assertEqual(len(lb['auto_lb_reserve']), 1)
         self.assertEqual(len(set(x['tag'] for x in conf['outbounds'])), len(conf['outbounds']))
         self.assertTrue(all(len(x) == len(set(x)) for x in lb.values()))
@@ -211,13 +211,13 @@ class AutoRoutingTests(unittest.TestCase):
         conf = s.build_auto(json.dumps(main), json.dumps(rest), True)
         rout = conf['routing']['rules']
         self.assertEqual(set(b['tag'] for b in conf['routing']['balancers']),
-                         {'auto_lb_gemini', 'auto_lb_other', 'auto_lb_all', 'auto_lb_reserve'})
+                         {'auto_lb_gemini', 'auto_lb_other', 'auto_lb_reserve'})
         self.assertEqual([r.get('outboundTag') for r in rout[:2]],
                          ['auto_panel_direct', 'auto_panel_direct'])
         self.assertEqual(rout[0]['domain'], domain_rule['domain'])
         self.assertEqual(rout[1]['ip'], ip_rule['ip'])
         self.assertEqual(rout[0]['inboundTag'],
-                         ['mixed', 'http', 'auto_fallback_all', 'auto_fallback_reserve'])
+                         ['mixed', 'http', 'auto_fallback_reserve'])
         self.assertEqual(rout[1]['inboundTag'], rout[0]['inboundTag'])
         self.assertTrue(all(r.get('balancerTag') is None for r in rout[:2]))
         # Both panel rules precede every route selecting a balancer.
@@ -244,14 +244,14 @@ class AutoRoutingTests(unittest.TestCase):
         self.assertEqual([r['outboundTag'] for r in rules[:2]],
                          ['auto_panel_block', 'auto_panel_direct'])
         self.assertEqual(rules[0]['inboundTag'],
-                         ['mixed', 'auto_fallback_all', 'auto_fallback_reserve'])
+                         ['mixed', 'auto_fallback_reserve'])
         self.assertEqual(rules[1]['inboundTag'], rules[0]['inboundTag'])
         self.assertEqual(rules[2]['balancerTag'], 'auto_lb_reserve')
-        self.assertEqual(rules[3]['balancerTag'], 'auto_lb_all')
+        self.assertTrue(any(r.get('balancerTag') == 'auto_lb_other' for r in rules))
         # Without reserve, no dangling synthetic tag or fallback rule.
         without_reserve = s.build_auto(json.dumps(main), json.dumps(rest), False)
         self.assertEqual(without_reserve['routing']['rules'][0]['inboundTag'],
-                         ['mixed', 'auto_fallback_all'])
+                         ['mixed'])
         self.assertNotIn('auto_fallback_reserve', str(without_reserve))
 
     def test_panel_pre_normalized_tags_work_even_without_explicit_outbound(self):
@@ -301,7 +301,7 @@ class AutoRoutingTests(unittest.TestCase):
             s.remember(ps)
         conf = s.build_auto(json.dumps(ps))
         lb = {x['tag']: x['selector'] for x in conf['routing']['balancers']}
-        self.assertEqual(len(lb['auto_lb_all']), 2)
+        self.assertEqual(len(lb['auto_lb_all']), 1)
         self.assertEqual(len(lb['auto_lb_other']), 1)
         self.assertNotEqual(lb['auto_lb_all'], lb['auto_lb_other'])
         with s.db() as con:
@@ -389,7 +389,7 @@ class AutoRoutingTests(unittest.TestCase):
         result = s.build_auto(json.dumps(original), json.dumps([reserve]), has_reserve=True)
         balancers = {bal['tag']: bal for bal in result['routing']['balancers']}
         self.assertEqual(set(balancers), {'auto_lb_gemini', 'auto_lb_other', 'auto_lb_all', 'auto_lb_reserve'})
-        self.assertEqual(len(balancers['auto_lb_all']['selector']), 3)
+        self.assertEqual(len(balancers['auto_lb_all']['selector']), 1)
         self.assertNotIn('auto_lb_ru', str(result))
         ru_rule = next(rule for rule in result['routing']['rules']
                        if rule.get('domain') == ['domain:ozon.ru', 'regexp:(^|\\.)ru$'])
@@ -434,14 +434,14 @@ class AutoRoutingTests(unittest.TestCase):
         self.assertEqual(s.nodes()[0]['pools'], ['gemini', 'all'])
         self.assertEqual(len([out for out in conf['outbounds'] if out['tag'].startswith('auto_node_')]), 1)
 
-    def test_both_gemini_other_populate_all_without_manual_all_assignment(self):
+    def test_gemini_other_do_not_implicitly_populate_all(self):
         ps = [self.profile('192.0.2.30', 20330), self.profile('192.0.2.31', 20331)]
         self.configure(ps, [('gemini', 'other'), ('gemini',)])
         conf = s.build_auto(json.dumps(ps))
         bal = {b['tag']: b['selector'] for b in conf['routing']['balancers']}
         self.assertEqual(len(bal['auto_lb_gemini']), 2)
         self.assertEqual(len(bal['auto_lb_other']), 1)
-        self.assertEqual(len(bal['auto_lb_all']), 2)
+        self.assertNotIn('auto_lb_all', bal)
         self.assertEqual(len([out for out in conf['outbounds'] if out['tag'].startswith('auto_node_')]), 2)
 
     def test_cleared_ru_domains_create_no_new_direct_when_panel_has_none(self):
@@ -525,6 +525,6 @@ class DuplicateEndpointRegressionTests(unittest.TestCase):
         conf = s.build_auto(json.dumps(main), json.dumps(reserve), True)
         lbs = {b['tag']: b['selector'] for b in conf['routing']['balancers']}
         self.assertEqual(len(lbs['auto_lb_other']), 2)
-        self.assertEqual(len(lbs['auto_lb_all']), 2)
+        self.assertNotIn('auto_lb_all', lbs)
         self.assertEqual(len(lbs['auto_lb_reserve']), 2)
         self.assertEqual(len({o['tag'] for o in conf['outbounds']}), len(conf['outbounds']))

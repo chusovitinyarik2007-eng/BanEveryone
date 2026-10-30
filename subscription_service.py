@@ -49,13 +49,28 @@ def random_name(username: str | None) -> str:
 
 
 async def list_inbounds():
-    """Только пользовательские inbound'ы. HTTP — служебные и исключаются."""
+    """Only enabled, customer-facing inbounds from the current 3x-ui panel.
+
+    /options may omit enable altogether. In that case verify every inbound
+    against /list; never silently display a disabled or unknown inbound.
+    """
     inbounds = await xui_connection.get_inbounds_options()
-    return [
-        inbound
-        for inbound in inbounds
-        if str(inbound.get("protocol") or "").strip().lower() != "http"
-    ]
+    if any(inbound.get("enable") is None for inbound in inbounds):
+        enabled = await xui_connection.get_inbounds_enabled_map()
+    else:
+        enabled = None
+
+    result = []
+    for inbound in inbounds:
+        if str(inbound.get("protocol") or "").strip().lower() == "http":
+            continue
+        if enabled is not None:
+            if not enabled.get(str(inbound.get("id")), False):
+                continue
+        elif inbound.get("enable") is not True:
+            continue
+        result.append(inbound)
+    return result
 
 
 async def _inbound_groups():
@@ -315,6 +330,43 @@ async def create_subscription(tg_id: int, username: str | None, months: int, ant
     db_driver.update_name_by_uuid(sub_id, email, tg_id)
     db_driver.set_subscription_max_device(sub_id, 2)
     return sub_id, email, sorted(regular_ids | (restricted_ids if anti_block else set())), expiry
+
+
+async def create_trial_subscription(tg_id: int, username: str | None):
+    """Configurable-duration trial, same base + --rest model as a paid full subscription."""
+    from datetime import timezone, timedelta
+    _, regular_ids, restricted_ids = await _inbound_groups()
+    if not regular_ids:
+        raise RuntimeError("Нет обычных подключений для пробного периода")
+    if not restricted_ids:
+        raise RuntimeError("Не настроены подключения Антиглушилки")
+    email = random_name(username)
+    sub_id = uuidlib.uuid4().hex
+    credential = str(uuidlib.uuid4())
+    days = int(settings.get("trial_days", 3))
+    if not 1 <= days <= 365:
+        raise ValueError("Недопустимый срок пробного периода (1–365 дней)")
+    expiry = int((datetime.now(timezone.utc) + timedelta(days=days)).timestamp() * 1000)
+    client = {
+        "email": email, "subId": sub_id, "id": credential, "uuid": credential,
+        "totalGB": 0, "expiryTime": expiry, "tgId": int(tg_id),
+        "limitIp": 0, "enable": True,
+    }
+    await xui_connection.create_client(client, sorted(regular_ids))
+    try:
+        await ensure_subscription_type_by_email(email, True)
+        db_driver.update_name_by_uuid(sub_id, email, tg_id)
+        db_driver.set_subscription_max_device(sub_id, 2)
+    except Exception:
+        # Do not release the claim on failure: panel creation might have succeeded.
+        # An administrator should reconcile a partial trial instead of issuing another.
+        try:
+            await ensure_subscription_type_by_email(email, False)
+            await xui_connection.delete_client(email)
+        except Exception:
+            pass
+        raise
+    return sub_id, email, expiry
 
 
 async def rotate_subscription_credentials(sub_id: str):
