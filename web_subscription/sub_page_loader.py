@@ -40,7 +40,7 @@ async def _request(sub_id):
         raise RuntimeError("BASE_SUB_URL is not set")
     url = template.format(sub_id=sub_id)
     # CA validation is enabled by default. For private CAs use a custom trust store.
-    async with httpx.AsyncClient(timeout=12.0, follow_redirects=False, verify=False) as client:
+    async with httpx.AsyncClient(timeout=12.0, verify=False) as client:
         response = await client.get(url, headers={"Accept": "text/plain"})
         response.raise_for_status()
         return response.text
