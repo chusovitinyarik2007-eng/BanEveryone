@@ -192,22 +192,13 @@ def _profile_mapping_key(endpoint_id, name, reserve=False):
 
 
 def remember(profiles, reserve=False):
-    """Cache identity matches only; refreshing a subscription never creates nodes."""
-    count = 0
-    with db() as con:
-        for ident, name, _, _ in candidates(profiles, reserve):
-            profile_key = _profile_mapping_key(ident, name, reserve)
-            existing = con.execute("SELECT node_id FROM smart_endpoint_map WHERE endpoint_id=?",
-                                   (profile_key,)).fetchone()
-            # A profile-specific association is authoritative; the legacy
-            # endpoint-only association may belong to a different inbound.
-            resolved = (existing[0] if existing and con.execute(
-                "SELECT 1 FROM smart_nodes WHERE id=?", (existing[0],)).fetchone()
-                else _resolve_node_id(con, name, ident))
-            if resolved:
-                con.execute("INSERT OR REPLACE INTO smart_endpoint_map VALUES (?,?)", (profile_key, resolved))
-            count += 1
-    return count
+    """Do not infer panel identities from stale aliases or old endpoint IDs.
+
+    Only link_profiles_to_inbounds(), which sees *both* current datasets,
+    may write trusted mappings. A read of a subscription must never revive an
+    obsolete association.
+    """
+    return len(candidates(profiles, reserve))
 
 
 def _read_dict(value):
@@ -228,37 +219,69 @@ def _outbound_port_protocol(outbound):
 
 
 def link_profiles_to_inbounds(profiles, inbounds, reserve=False):
-    """Link current endpoints to persistent inbound IDs even after remark or config changes.
+    """Associate profiles with panel IDs only when correspondence is unique.
 
-    Match unique (protocol, port) first; matching names are a secondary option.
-    Ambiguous cases are intentionally ignored rather than linked to wrong pools.
+    Prefer an exact, unique remark match. Use (protocol, port) only if that
+    pair occurs *exactly once on each side*; matching a single panel inbound
+    to several profiles on port 443 used to put every node in one balancer.
+    Never guess from a stale alias or an old endpoint-only mapping.
+
+    Each refresh removes previous mappings for the currently supplied profiles
+    before inserting verified matches, so changes fail closed, not into the
+    wrong pool. The administrator's stored node memberships/rules are intact.
     """
-    candidates_by_name, by_port = {}, {}
+    from collections import Counter, defaultdict
+
+    profiles_list = candidates(profiles, reserve)
+    panel_by_name = defaultdict(set)
+    panel_by_pair = defaultdict(set)
     for inbound in inbounds:
         try:
-            key = panel_key(inbound["id"])
-            protocol = str(inbound.get("protocol") or "").lower()
-            port = int(inbound.get("port"))
+            node_id = panel_key(inbound['id'])
         except (KeyError, ValueError, TypeError):
             continue
-        if protocol not in PROXY_PROTOCOLS:
-            continue
-        by_port.setdefault((protocol, port), set()).add(key)
-        candidates_by_name.setdefault(_name_key(inbound.get("remark")), set()).add(key)
-    with db() as con:
-        for ident, name, outbound, _ in candidates(profiles, reserve):
-            matches = set()
+        panel_by_name[_name_key(inbound.get('remark'))].add(node_id)
+        try:
+            panel_by_pair[(str(inbound.get('protocol') or '').lower(),
+                           int(inbound['port']))].add(node_id)
+        except (KeyError, ValueError, TypeError):
+            pass
+
+    names = Counter(_name_key(name) for _, name, _, _ in profiles_list)
+    pairs = Counter(pair for _, _, outbound, _ in profiles_list
+                    for pair in _outbound_port_protocol(outbound))
+    verified = []
+    for ident, name, outbound, _ in profiles_list:
+        normalized = _name_key(name)
+        node_id = None
+        name_matches = panel_by_name.get(normalized, set())
+        if normalized and names[normalized] == 1 and len(name_matches) == 1:
+            node_id = next(iter(name_matches))
+        else:
+            # Unique-on-both-sides fallback, never infer identity from a
+            # shared standard port (443/80/etc).
+            choices = set()
             for pair in _outbound_port_protocol(outbound):
-                matches.update(by_port.get(pair, set()))
-            if len(matches) != 1:
-                matches = candidates_by_name.get(_name_key(name), set())
-            if len(matches) == 1:
-                node_id = next(iter(matches))
-                con.execute("INSERT OR REPLACE INTO smart_endpoint_map VALUES (?,?)",
-                            (_profile_mapping_key(ident, name, reserve), node_id))
-                # Retain the endpoint-only association for compatibility, but
-                # never rely on it over a profile-specific association.
-                con.execute("INSERT OR IGNORE INTO smart_endpoint_map VALUES (?,?)", (ident, node_id))
+                if pairs[pair] == 1 and len(panel_by_pair[pair]) == 1:
+                    choices.update(panel_by_pair[pair])
+            if len(choices) == 1:
+                node_id = next(iter(choices))
+        if node_id:
+            verified.append((_profile_mapping_key(ident, name, reserve), node_id))
+
+    with db() as con:
+        for ident, name, _, _ in profiles_list:
+            con.execute('DELETE FROM smart_endpoint_map WHERE endpoint_id=?',
+                        (_profile_mapping_key(ident, name, reserve),))
+            # Older format was not scoped and may be wrong or ambiguous.
+            con.execute('DELETE FROM smart_endpoint_map WHERE endpoint_id=?', (ident,))
+        # If two profiles resolve to the same panel node, do not accept either:
+        # one inbound should not silently capture multiple distinct profiles.
+        counts = Counter(node_id for _, node_id in verified)
+        for profile_key, node_id in verified:
+            if counts[node_id] == 1:
+                con.execute('INSERT OR REPLACE INTO smart_endpoint_map VALUES (?,?)',
+                            (profile_key, node_id))
 
 
 def _merge_pools(a, b):
@@ -326,7 +349,8 @@ def sync_panel_inbounds(inbounds):
                 con.execute("INSERT INTO smart_nodes VALUES (?,?,?)", (ident, name, '[]'))
             con.execute("INSERT OR REPLACE INTO smart_aliases VALUES (?,?)", (_name_key(name), ident))
             valid.append(ident)
-        migrate_legacy_nodes(con, set(valid))
+        # Never merge old endpoint memberships into panel IDs by a matching name.
+        # It can silently repopulate pools after an administrator clears them.
     return valid
 
 
@@ -477,19 +501,18 @@ def build_auto(primary, rest=None, has_reserve=False):
         mapped = dict(con.execute("SELECT endpoint_id,node_id FROM smart_endpoint_map").fetchall())
     endpoint_owners = {}
     for ep_id, display_name, _, is_reserve in profiles:
-        owner = mapped.get(_profile_mapping_key(ep_id, display_name, is_reserve),
-                           mapped.get(ep_id, ep_id))
+        owner = mapped.get(_profile_mapping_key(ep_id, display_name, is_reserve))
         endpoint_owners.setdefault((is_reserve, ep_id), set()).add(owner)
     unique = {}
     memberships = {b['id']: [] for b in definitions}
     outputs = []
     for ident, name, outbound, is_rest in profiles:
         profile_key = _profile_mapping_key(ident, name, is_rest)
-        resolved_id = mapped.get(profile_key, mapped.get(ident, ident))
+        resolved_id = mapped.get(profile_key)
         collision = len(endpoint_owners[(is_rest, ident)]) > 1
         scoped_ident = ("reserve_" if is_rest else "main_") + (
             ident + "_" + resolved_id.replace(":", "_") if collision else ident)
-        membership = configured.get(resolved_id, [])
+        membership = configured.get(resolved_id, []) if resolved_id else []
         eligible = [b for b in definitions if b['scope'] == ('reserve' if is_rest else 'main')
                     and (not is_rest or has_reserve)]
         selected = [b['id'] for b in eligible if b['id'] in membership]

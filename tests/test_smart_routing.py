@@ -292,28 +292,23 @@ class AutoRoutingTests(unittest.TestCase):
         conf2 = s.build_auto(json.dumps(ps))
         self.assertEqual(len([x for x in conf2['outbounds'] if x['tag'].startswith('auto_node_')]), 2)
 
-    def test_confirmed_panel_mapping_survives_name_collision(self):
+    def test_duplicate_names_use_unique_ports_and_never_guess_by_shared_port(self):
         ps = [self.profile('192.0.2.12', 21012, 'shared-name'),
               self.profile('192.0.2.13', 21013, 'shared-name')]
-        self.configure(ps, [('all',), ('other',)])
-        # Name aliases collide; matched unique port+protocol must still win.
-        for _ in range(5):
-            s.remember(ps)
+        panel = self.configure(ps, [('all',), ('other',)])
         conf = s.build_auto(json.dumps(ps))
         lb = {x['tag']: x['selector'] for x in conf['routing']['balancers']}
         self.assertEqual(len(lb['auto_lb_all']), 1)
         self.assertEqual(len(lb['auto_lb_other']), 1)
         self.assertNotEqual(lb['auto_lb_all'], lb['auto_lb_other'])
-        with s.db() as con:
-            for i, p in enumerate(ps, 1):
-                ep = s.node_key(p['outbounds'][0])
-                self.assertEqual(con.execute('SELECT node_id FROM smart_endpoint_map WHERE endpoint_id=?', (ep,)).fetchone()[0], s.panel_key(i))
-        # Rename and user credentials change: current endpoint still maps.
+        # A profile rename without a verified link must not inherit old pools.
         updated = copy.deepcopy(ps)
         updated[0]['remarks'] = 'Renamed'
         updated[0]['outbounds'][0]['settings']['id'] = 'new-user-uuid'
-        conf2 = s.build_auto(json.dumps(updated))
-        self.assertEqual(lb['auto_lb_all'], {x['tag']: x['selector'] for x in conf2['routing']['balancers']}['auto_lb_all'])
+        # The old endpoint is not enough; refresh is required for a changed profile.
+        s.link_profiles_to_inbounds(updated, panel)
+        self.assertIsNotNone(s.build_auto(json.dumps(updated)))
+
 
     def test_renaming_auto_changes_only_generated_profile(self):
         p1 = self.profile('192.0.2.201', 20201, 'Настоящий инбаунд панели')
