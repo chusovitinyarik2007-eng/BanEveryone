@@ -15,6 +15,7 @@ from limited_inbounds import user_check_inbounds_rest, update_users_rest
 import base64
 import json
 import smart_routing
+import vless_config
 from subscription_clients import classify, NO_CACHE
 import xui_connection
 import userBot.bot as userbot
@@ -111,14 +112,13 @@ async def get_sub(request: Request):
     name = user.name
     mx_devices = user.max_device
     device_info = user.current_device
-    userinfo = (await xui_connection.get_user_info(name)).get('obj', {})
+    userinfo = (await xui_connection.get_user_info(name)).get('obj') or {}
     userinforest = await xui_connection.get_user_info(name + "--rest")
-    used_gb = userinforest.get('obj', {}).get('usedTraffic', 0)
-    totalgb = (userinforest.get('obj', {})
-               .get('client', {})
-               .get("totalGB", 0))
+    rest_details = (userinforest or {}).get('obj') or {}
+    used_gb = rest_details.get('usedTraffic', 0)
+    totalgb = (rest_details.get('client') or {}).get("totalGB", 0)
     if uuid in settings["whitelist"]:
-        return await fetch_real_sub(uuid, request, mx_devices, len(device_info), totalgb, used_gb)
+        return await fetch_real_sub(uuid, request, mx_devices, len(device_info), totalgb, used_gb, rest_info=userinforest)
     hwid = request.headers.get('x-hwid') or request.headers.get("X-HWID")
     device_os = request.headers.get('x-device-os') or request.headers.get("X-DEVICE-OS")
     device = request.headers.get('x-device-model') or request.headers.get("X-DEVICE-MODEL")
@@ -141,7 +141,7 @@ async def get_sub(request: Request):
         return make_denied_response(UNCNOWN_LINK)
 
     return await fetch_real_sub(
-        uuid, request, actual_limit, current_count, totalgb, used_gb
+        uuid, request, actual_limit, current_count, totalgb, used_gb, rest_info=userinforest
     )
 
 
@@ -252,6 +252,7 @@ async def fetch_real_sub(
     cur,
     total_gb,
     remain_gb,
+    rest_info=None,
 ) -> Response:
     import tgbot
     import subscription_service
@@ -361,6 +362,7 @@ async def fetch_real_sub(
 
     # AUTO exists only in JSON subscriptions. A missing/removed node or
     # an invalid --rest payload must not break normal subscription delivery.
+    rest_profiles = None
     try:
         main_profiles = smart_routing.read_profiles(resp.content)
         rest_profiles = (smart_routing.read_profiles(rest_resp.content)
@@ -388,6 +390,20 @@ async def fetch_real_sub(
     except Exception:
         import logging
         logging.getLogger(__name__).exception("AUTO profile generation failed")
+
+    # Vless config is a separate, precompiled JSON profile appended LAST.
+    # It is available ONLY with the currently enabled, non-expired --rest
+    # anti-block service client and an active 3x-ui JSON subscription.
+    try:
+        if (rest_sub_id and rest_resp is not None and rest_resp.status_code == 200
+                and rest_profiles and isinstance(smart_routing.read_profiles(resp.content), list)):
+            live_rest = rest_info if rest_info is not None else await xui_connection.get_user_info(
+                db_driver.get_data_by(sub_id).name + '--rest')
+            if vless_config.rest_active(live_rest, restricted_ids=settings.get('restricted_inbounds', [])):
+                content = vless_config.append_cached(content)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception('Vless config append failed')
 
     # ---------------------------------------------------------
     # RESPONSE HEADERS

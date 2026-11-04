@@ -509,15 +509,19 @@ def build_auto(primary, rest=None, has_reserve=False):
     for ident, name, outbound, is_rest in profiles:
         profile_key = _profile_mapping_key(ident, name, is_rest)
         resolved_id = mapped.get(profile_key)
-        collision = len(endpoint_owners[(is_rest, ident)]) > 1
-        scoped_ident = ("reserve_" if is_rest else "main_") + (
-            ident + "_" + resolved_id.replace(":", "_") if collision else ident)
+        # An endpoint without a verified panel-inbound mapping has no pool
+        # membership. Skip it BEFORE computing a collision-specific tag:
+        # resolved_id is None for those endpoints, and calling .replace()
+        # on it used to crash subscription generation.
         membership = configured.get(resolved_id, []) if resolved_id else []
         eligible = [b for b in definitions if b['scope'] == ('reserve' if is_rest else 'main')
                     and (not is_rest or has_reserve)]
         selected = [b['id'] for b in eligible if b['id'] in membership]
         if not selected:
             continue
+        collision = len(endpoint_owners[(is_rest, ident)]) > 1
+        scoped_ident = ("reserve_" if is_rest else "main_") + (
+            ident + "_" + resolved_id.replace(":", "_") if collision else ident)
         tag = unique.get(scoped_ident)
         if tag is None:
             tag = 'auto_node_' + scoped_ident

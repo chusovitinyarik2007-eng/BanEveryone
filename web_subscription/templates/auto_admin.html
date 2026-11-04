@@ -1,10 +1,15 @@
 <!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="robots" content="noindex,nofollow,noarchive"><meta name="theme-color" content="#0a1225"><title>AUTO · Управление маршрутизацией</title><link rel="stylesheet" href="static/auto_admin.css"><script src="static/auto_admin.js" defer></script></head>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="robots" content="noindex,nofollow,noarchive"><meta name="theme-color" content="#0a1225"><title>AUTO · Управление маршрутизацией</title><link rel="stylesheet" href="static/auto_admin.css"><script src="static/auto_admin.js" defer></script><script src="static/vless_admin.js?v=20261105-2" defer></script></head>
 <body><div class="aurora" aria-hidden="true"></div><div class="noise" aria-hidden="true"></div>
 <main class="page">
 <header class="top"><div class="brand"><span class="brand-icon">✦</span><div><strong>Сосиски VPN <span class="muted">/ AUTO</span></strong><small>Центр управления маршрутизацией</small></div></div><div class="top-actions"><span class="session" id="sessionInfo" hidden></span><button id="logout" class="btn outline" hidden>Выйти <span aria-hidden="true">↗</span></button></div></header>
 <section id="login" class="login-wrap"><div class="glass login-card"><span class="secure-icon">🛡</span><div class="eyebrow">ЗАЩИЩЁННЫЙ ДОСТУП</div><h1>Панель управления <span class="gradient">AUTO</span></h1><p>Вход разрешён только администраторам. Подтверди запрос в Telegram — пароль не требуется.</p><button id="startLogin" class="btn primary wide">Авторизоваться через Telegram <span aria-hidden="true">↗</span></button><div id="loginPending" class="pending" hidden><div>Код подтверждения <strong id="loginCode"></strong></div><p>Сверь код на странице и в сообщении бота. Подтверди вход в личном чате.</p><a id="telegramLink" class="btn secondary wide" target="_blank" rel="noopener noreferrer">Открыть Telegram ↗</a><small>Ссылка действует 3 минуты. Одобрение привязано к этому браузеру.</small></div><div id="loginError" role="alert" class="error" hidden></div></div></section>
 <div id="dashboard" hidden>
+<nav class="auto-tabs" aria-label="Умные подключения">
+  <button class="btn primary" id="tabBase" type="button" aria-selected="true">🔀 BASE AUTO</button>
+  <button class="btn outline" id="tabVless" type="button" aria-selected="false">🚀 Vless config</button>
+</nav>
+<div id="basePanel">
 <div class="intro"><div><span class="eyebrow">НАСТРОЙКИ ПОДПИСКИ</span><h1>Умная маршрутизация <span class="gradient">AUTO</span></h1><p>Управляй правилами, резервными маршрутами и выбором серверов. Изменения применятся при следующем обновлении подписки.</p></div><div class="status-pill" id="autoStatus">● Загрузка…</div></div>
 <section class="glass section" aria-label="Глобальные параметры"><div class="section-title"><div><span class="eyebrow">01 · ПАРАМЕТРЫ</span><h2>Глобальные настройки</h2></div><label class="switch-line"><input id="autoEnabled" type="checkbox"><span>Включить AUTO</span></label></div>
 <div class="global-grid"><label>Название подключения AUTO<div class="input-row"><input id="autoName" maxlength="100" placeholder="AUTO"><button class="btn outline" data-action="save-name">Сохранить</button></div></label><label>Интервал проверки всех серверов<div class="input-row"><select id="probeInterval"><option value="10s">10 секунд</option><option value="15s">15 секунд</option><option value="30s">30 секунд</option><option value="45s">45 секунд</option><option value="1m">1 минута</option><option value="2m">2 минуты</option><option value="5m">5 минут</option><option value="10m">10 минут</option><option value="30m">30 минут</option><option value="1h">1 час</option></select><button class="btn outline" data-action="save-interval">Применить</button></div></label></div>
@@ -14,6 +19,31 @@
 <div class="layout"><aside class="glass pool-list"><div id="poolList" class="pool-items"></div><div class="create-pool"><label>Новый балансировщик<input id="newPoolName" maxlength="70" placeholder="Например, Видео"></label><div class="input-row"><select id="newPoolScope"><option value="main">Обычные серверы</option><option value="reserve">Только Антиглушилка</option></select><button class="btn primary" data-action="create">Создать +</button></div></div></aside>
 <div class="glass editor" id="editor"><div class="editor-empty">Выбери балансировщик слева, чтобы настроить его.</div></div></div>
 </section>
+</div><!-- /basePanel -->
+<div id="vlessPanel" hidden>
+  <div class="intro"><div><span class="eyebrow">ОТДЕЛЬНОЕ УМНОЕ ПОДКЛЮЧЕНИЕ</span><h1>🚀 <span class="gradient">Vless config</span></h1>
+    <p>Добавляй VLESS-ссылки вручную. JSON создаётся и сохраняется только при изменениях; конечным пользователям добавляется последним и только при действующей Антиглушилке.</p></div>
+    <div class="status-pill" id="vlessStatus">Загрузка…</div>
+  </div>
+  <section class="glass section" aria-label="Настройки Vless config">
+    <div class="section-title"><div><span class="eyebrow">01 · ОБЩИЕ</span><h2>Настройки подключения</h2></div>
+      <label class="switch-line"><input type="checkbox" id="vEnabled"><span>Включить Vless config</span></label></div>
+    <div class="global-grid">
+      <label>Название профиля<input id="vName" maxlength="100" placeholder="Vless config"></label>
+      <label>Стратегия балансировки<select id="vStrategy"><option value="leastPing">leastPing · минимальный пинг</option><option value="leastLoad">leastLoad · стабильность</option><option value="roundRobin">roundRobin · по очереди</option><option value="random">random · случайно</option></select></label>
+      <label>Интервал проверки<select id="vInterval"><option value="10s">10 секунд</option><option value="15s">15 секунд</option><option value="30s">30 секунд</option><option value="45s">45 секунд</option><option value="1m">1 минута</option><option value="2m">2 минуты</option><option value="5m">5 минут</option><option value="10m">10 минут</option><option value="30m">30 минут</option><option value="1h">1 час</option></select></label>
+      <label>URL проверки доступности<input id="vProbe" maxlength="300" placeholder="https://www.gstatic.com/generate_204"></label>
+    </div>
+    <div class="rule-editor"><h4>Маршрутизация в DIRECT (обход VPN)</h4><p class="hint">По одному правилу в строке. Поддерживаются domain:, full:, geosite:, regexp:, keyword:, ip:, geoip:. Они применяются раньше балансировщика.</p><textarea id="vRules" rows="6" spellcheck="false" placeholder="domain:example.ru&#10;geoip:private"></textarea></div>
+    <div class="editor-buttons"><button class="btn primary" id="vSaveSettings">Сохранить настройки</button><a class="btn outline" id="vPreview" href="#" target="_blank" rel="noopener">Показать собранный JSON</a></div>
+  </section>
+  <section class="glass section"><div class="section-title"><div><span class="eyebrow">02 · ИСХОДНЫЕ СЕРВЕРЫ</span><h2>Управление VLESS-ключами</h2><p class="hint">Подключения внутри профиля не выдаются как отдельные пункты подписки.</p></div><span class="count" id="vCount">0 серверов</span></div>
+    <label>Добавить несколько ссылок (по одной vless:// в строке; ss:// будет пропущен с предупреждением)</label>
+    <textarea id="vNewLinks" rows="5" spellcheck="false" placeholder="vless://uuid@example.com:443?type=tcp&amp;security=reality&amp;pbk=...#Germany&#10;vless://..."></textarea>
+    <div class="editor-buttons"><button class="btn primary" id="vAdd">Добавить ссылки</button><button class="btn outline" id="vCopyAll" type="button" disabled>📋 Скопировать все ключи</button><button class="btn danger" id="vClear">Удалить ВСЕ ключи</button></div>
+    <div class="rule-editor"><h4>Сохранённые серверы</h4><p class="hint">Можно менять URI, название, включать или выключать отдельные серверы и удалять их. При любом изменении JSON пересобирается ровно один раз.</p><div id="vNodeList" class="v-node-list"></div></div>
+  </section>
+</div><!-- /vlessPanel -->
 <footer class="footer"><span>Изменения применяются при новом запросе AUTO клиентом.</span><span>Сессия закрывается автоматически через 6 часов.</span></footer>
 </div></main><div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 </body></html>

@@ -124,6 +124,11 @@ def _write_access(req):
 @router.get('/', response_class=HTMLResponse, include_in_schema=False)
 async def admin_page(req: Request):
     template = (ROOT / 'web_subscription' / 'templates' / 'auto_admin.html').read_text(encoding='utf-8')
+    # Absolute static URLs work with both /adm and /adm/ without breaking the
+    # reverse-proxy subscription prefix.
+    static_prefix = router_prefix().removesuffix('/adm') + '/static/'
+    template = template.replace('href="static/', 'href="' + static_prefix).replace(
+        'src="static/', 'src="' + static_prefix)
     return HTMLResponse(template, headers=HEADERS)
 
 
@@ -282,3 +287,90 @@ async def logout(req: Request):
     resp.delete_cookie(SESSION_COOKIE, path=router_prefix(), secure=False, samesite='strict')
     resp.delete_cookie(CHALLENGE_COOKIE, path=router_prefix(), secure=False, samesite='strict')
     return resp
+
+# ---------------- Admin: cached VLESS config (independent of BASE AUTO) -----
+
+import vless_config as manual
+
+
+class ManualLinks(StrictData):
+    links: StrictStr = Field(min_length=1, max_length=60000)
+
+
+class ManualNodeUpdate(StrictData):
+    uri: StrictStr | None = Field(default=None, max_length=8192)
+    name: StrictStr | None = Field(default=None, max_length=100)
+    enabled: StrictBool | None = None
+
+
+class ManualSettingsUpdate(StrictData):
+    name: StrictStr | None = Field(default=None, max_length=100)
+    enabled: StrictBool | None = None
+    interval: StrictStr | None = None
+    probe_url: StrictStr | None = Field(default=None, max_length=300)
+    strategy: StrictStr | None = None
+    direct_rules: list[StrictStr] | None = Field(default=None, max_length=500)
+
+
+@router.get('/api/vless/state')
+async def vless_state(req: Request):
+    account = _session(req)
+    return JSONResponse({**manual.state(include_secrets=True),
+                         'csrf':account['csrf'], 'expires_at':account['expires']},headers=HEADERS)
+
+
+@router.post('/api/vless/keys')
+async def vless_add(req: Request, payload: ManualLinks):
+    _write_access(req)
+    try:
+        return manual.add_links(payload.links)
+    except ValueError as exc:
+        raise HTTPException(400,str(exc)) from exc
+
+
+@router.patch('/api/vless/keys/{ident}')
+async def vless_edit(req: Request, ident: str, payload: ManualNodeUpdate):
+    _write_access(req)
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes or any(v is None for v in changes.values()):
+        raise HTTPException(400,'Укажите изменения')
+    try:
+        return manual.update_node(ident,**changes)
+    except ValueError as exc:
+        raise HTTPException(400,str(exc)) from exc
+
+
+@router.delete('/api/vless/keys/{ident}')
+async def vless_remove(req: Request, ident: str):
+    _write_access(req)
+    try:
+        return manual.delete_node(ident)
+    except ValueError as exc:
+        raise HTTPException(400,str(exc)) from exc
+
+
+@router.delete('/api/vless/keys')
+async def vless_clear(req: Request):
+    _write_access(req)
+    return manual.clear_nodes()
+
+
+@router.patch('/api/vless/settings')
+async def vless_options(req: Request, payload: ManualSettingsUpdate):
+    _write_access(req)
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes or any(v is None for v in changes.values()):
+        raise HTTPException(400,'Укажите изменения')
+    try:
+        return manual.update_settings(**changes)
+    except ValueError as exc:
+        raise HTTPException(400,str(exc)) from exc
+
+
+@router.get('/api/vless/profile')
+async def vless_preview(req: Request):
+    _session(req)
+    body = manual.compiled_json()
+    if not body:
+        raise HTTPException(404,'Нет включённого скомпилированного профиля')
+    return Response(body,media_type='application/json',headers=HEADERS)

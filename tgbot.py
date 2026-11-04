@@ -927,10 +927,11 @@ def _auto_keyboard(items, width=2):
 
 
 def _auto_home():
-    switches = [(f"{'✅' if smart_routing.enabled() else '❌'} AUTO", "auto:master")]
+    switches = [(f"{'✅' if smart_routing.enabled() else '❌'} BASE AUTO", "auto:master")]
     switches.extend([("🗂 Балансировщики", "auto2:list"),
                      (f"⏱ Проверка: {rb.interval()}", "auto2:interval"),
                      ("✏️ Название AUTO", "auto:rename"),
+                     ("🚀 Vless config", "av:home"),
                      ("🌐 Веб-панель AUTO", "auto:web"),
                      ("🔄 Обновить", "auto:home")])
     return _auto_keyboard(switches, 2)
@@ -966,11 +967,15 @@ def _page_controls(entries, pool, page):
 async def auto_menu(message: Message):
     if not is_admin(message.from_user.id):
         return
-    await message.answer("🔀 <b>AUTO · настройка JSON-подписки</b>\n"
-                         "Создавайте балансировщики с правилами, стратегией и fallback.\n"
-                         "Старые RU-правила DIRECT сохранены; редактируются в веб-панели.\n"
-                         "Пулы выбираются из инбаундов панели; отсутствующие узлы игнорируются.",
-                         reply_markup=_auto_home(), parse_mode="HTML")
+    await message.answer("🔀 <b>Умные подключения /auto</b>\n"
+                         "BASE AUTO — прежняя маршрутизация из 3x-ui.\n"
+                         "Vless config — отдельный кешированный профиль из ручных VLESS.\n"
+                         "Управлять можно здесь или во вкладках веб-панели.",
+                         reply_markup=_auto_keyboard([
+                             ("🔀 BASE AUTO", "auto:home"),
+                             ("🚀 Vless config", "av:home"),
+                             ("🌐 Веб-панель", "auto:web"),
+                         ],1), parse_mode="HTML")
 
 
 @dp.callback_query(F.data.startswith("auto:"))
@@ -1438,3 +1443,217 @@ async def auto_dynamic_text(message: Message, state: FSMContext):
         return
     await state.clear()
     await message.answer(_escape_auto(text), reply_markup=_auto_home())
+
+# ---------------------- Vless config: second /auto profile ------------------
+import vless_config as vc
+
+
+class VlessBotState(StatesGroup):
+    waiting_links = State()
+    waiting_profile_name = State()
+    waiting_node_name = State()
+    waiting_node_uri = State()
+    waiting_probe = State()
+    waiting_rules = State()
+
+
+def _vless_keyboard(page=0):
+    st = vc.state()
+    items = [
+        (('✅ ' if st['enabled'] else '❌ ') + 'Vless config', 'av:toggle'),
+        (f"📦 Ключи: {len(st['nodes'])} · включено {st['active_nodes']}", 'av:list:0'),
+        ('➕ Добавить VLESS', 'av:add'),
+        ('✏️ Название', 'av:profile'),
+        (f"⚖️ {st['strategy']}", 'av:strategies'),
+        (f"⏱ {st['interval']}", 'av:intervals'),
+        ('🌐 URL проверки', 'av:probe'),
+        (f"🌍 DIRECT: {len(st['direct_rules'])} правил", 'av:rules'),
+        ('🗑 Удалить все ключи', 'av:clear'),
+        ('🔀 BASE AUTO', 'auto:home'),
+    ]
+    return _auto_keyboard(items, 2)
+
+
+def _vless_node_keyboard(st, page=0):
+    nodes = st['nodes']; pages=max(1,(len(nodes)+6)//7); page=max(0,min(page,pages-1))
+    items = [(('✅ ' if n['enabled'] else '▫️ ') + n['name'][:38], f"av:node:{n['id']}:{page}")
+             for n in nodes[page*7:(page+1)*7]]
+    if page: items.append(('⬅️',f'av:list:{page-1}'))
+    if page+1<pages: items.append(('➡️',f'av:list:{page+1}'))
+    items.append(('◀️ Vless config', 'av:home'))
+    return _auto_keyboard(items,1),page,pages
+
+
+@dp.callback_query(F.data.startswith('av:'))
+async def vless_bot_callbacks(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id) or not callback.message or callback.message.chat.type != 'private':
+        await callback.answer('Управление разрешено только администратору в личном чате',show_alert=True)
+        return
+    fields = (callback.data or '').split(':')
+    action = fields[1] if len(fields)>1 else ''
+    st = vc.state()
+    if action == 'home':
+        await _auto_render(callback,
+            f"🚀 <b>Vless config</b> · отдельный JSON-профиль\n"
+            f"Включён: {'да' if st['enabled'] else 'нет'} · ключей: {len(st['nodes'])}\n"
+            "Конфигурация сохраняется при изменениях; клиентам отдается без сборки.\n"
+            "Только при действующей Антиглушилке --rest.", _vless_keyboard())
+    elif action == 'toggle':
+        vc.update_settings(enabled=not st['enabled'])
+        await _auto_render(callback,'🚀 <b>Vless config</b> · состояние изменено',_vless_keyboard())
+    elif action == 'list':
+        index=int(fields[2]) if len(fields)>2 and fields[2].isdigit() else 0
+        kb,page,pages=_vless_node_keyboard(st,index)
+        await _auto_render(callback,f'📦 <b>Вручную добавленные VLESS</b> · {page+1}/{pages}\n'
+                           'Выбери сервер для изменения.',kb)
+    elif action == 'node' and len(fields)>=3:
+        node=next((n for n in st['nodes'] if n['id']==fields[2]),None)
+        if not node:
+            await callback.answer('Сервер уже удалён',show_alert=True);return
+        page=fields[3] if len(fields)>3 and fields[3].isdigit() else '0'
+        actions=[(('🟢 Выключить' if node['enabled'] else '🟢 Включить'),f'av:on:{node["id"]}:{page}'),
+                 ('✏️ Имя', f'av:editname:{node["id"]}:{page}'),
+                 ('🔗 Заменить URI', f'av:edituri:{node["id"]}:{page}'),
+                 ('🗑 Удалить', f'av:delask:{node["id"]}:{page}'),
+                 ('◀️ Список',f'av:list:{page}')]
+        await _auto_render(callback,f"🔐 <b>{_escape_auto(node['name'])}</b>\n"
+                           f"Состояние: {'включён' if node['enabled'] else 'выключен'}\n"
+                           'Сам ключ не показывается в сообщении; редактирование в личном чате.',
+                           _auto_keyboard(actions,1))
+    elif action=='on' and len(fields)>=3:
+        node=next((n for n in st['nodes'] if n['id']==fields[2]),None)
+        if node: vc.update_node(node['id'],enabled=not node['enabled'])
+        kb,_,_=_vless_node_keyboard(vc.state(),int(fields[3]) if len(fields)>3 and fields[3].isdigit() else 0)
+        await _auto_render(callback,'✅ Изменение сохранено · JSON пересобран',kb)
+    elif action=='delask' and len(fields)>=3:
+        await _auto_render(callback,'⚠️ Удалить этот сервер?',_auto_keyboard([
+            ('✅ Да, удалить',f'av:delete:{fields[2]}:{fields[3] if len(fields)>3 else "0"}'),
+            ('❌ Нет',f'av:node:{fields[2]}:{fields[3] if len(fields)>3 else "0"}')],1))
+    elif action=='delete' and len(fields)>=3:
+        try: vc.delete_node(fields[2])
+        except ValueError as exc:
+            await callback.answer(str(exc),show_alert=True);return
+        kb,_,_=_vless_node_keyboard(vc.state(),int(fields[3]) if len(fields)>3 and fields[3].isdigit() else 0)
+        await _auto_render(callback,'✅ Сервер удалён; JSON обновлён',kb)
+    elif action=='clear':
+        await _auto_render(callback,'⚠️ <b>Удалить все добавленные вручную VLESS?</b>\n'
+                           'Действие нельзя отменить.',_auto_keyboard([
+                               ('🗑 Подтверждаю удаление', 'av:clearconfirm'),
+                               ('❌ Отмена', 'av:home')],1))
+    elif action=='clearconfirm':
+        vc.clear_nodes()
+        await _auto_render(callback,'✅ Все VLESS-ключи удалены',_vless_keyboard())
+    elif action in ('add','profile','probe','rules','editname','edituri'):
+        modes={'add':VlessBotState.waiting_links,
+               'profile':VlessBotState.waiting_profile_name,
+               'probe':VlessBotState.waiting_probe,
+               'rules':VlessBotState.waiting_rules,
+               'editname':VlessBotState.waiting_node_name,
+               'edituri':VlessBotState.waiting_node_uri}
+        await state.set_state(modes[action])
+        await state.set_data({'node_id':fields[2] if len(fields)>2 else None,'parts':[]})
+        prompts={
+            'add':'Отправь VLESS-ссылки (одна на строку, можно одним сообщением). /cancel — отмена.',
+            'profile':'Отправь новое имя Vless config. /cancel — отмена.',
+            'probe':'Отправь новый HTTPS URL проверки доступности. /cancel — отмена.',
+            'rules':'Отправляй DIRECT-правила по одному на строку, можно несколькими сообщениями. '
+                    '/done — сохранить все; /reset — очистить черновик; символ «-» очищает список. /cancel — отмена.',
+            'editname':'Отправь новое имя выбранного сервера. /cancel — отмена.',
+            'edituri':'Отправь новую VLESS-ссылку для выбранного сервера. /cancel — отмена.',
+        }
+        await callback.message.answer(_escape_auto(prompts[action]),parse_mode='HTML')
+    elif action=='strategies':
+        await _auto_render(callback,'⚖️ Выбери стратегию. leastPing — минимальная задержка.',
+            _auto_keyboard([(f"{'✅ ' if s==st['strategy'] else ''}{s}",f'av:strategy:{s}') for s in vc.STRATEGIES]+
+                           [('◀️ Назад','av:home')],1))
+    elif action=='strategy' and len(fields)>=3 and fields[2] in vc.STRATEGIES:
+        vc.update_settings(strategy=fields[2])
+        await _auto_render(callback,'✅ Стратегия изменена; JSON обновлён',_vless_keyboard())
+    elif action=='intervals':
+        await _auto_render(callback,'⏱ Выбери период проверки серверов:',
+            _auto_keyboard([(f"{'✅ ' if v==st['interval'] else ''}{v}",f'av:int:{v}') for v in vc.INTERVALS]+
+                           [('◀️ Назад','av:home')],2))
+    elif action=='int' and len(fields)>=3 and fields[2] in vc.INTERVALS:
+        vc.update_settings(interval=fields[2])
+        await _auto_render(callback,'✅ Интервал изменён; JSON обновлён',_vless_keyboard())
+    else:
+        await callback.answer('Устаревшее меню. Откройте /auto заново.',show_alert=True)
+        return
+    await callback.answer()
+
+
+@dp.message(Command('cancel'), VlessBotState.waiting_links)
+@dp.message(Command('cancel'), VlessBotState.waiting_profile_name)
+@dp.message(Command('cancel'), VlessBotState.waiting_node_name)
+@dp.message(Command('cancel'), VlessBotState.waiting_node_uri)
+@dp.message(Command('cancel'), VlessBotState.waiting_probe)
+@dp.message(Command('cancel'), VlessBotState.waiting_rules)
+async def vless_bot_cancel(message: Message,state: FSMContext):
+    await state.clear()
+    if is_admin(message.from_user.id):
+        await message.answer('Отменено.',reply_markup=_vless_keyboard())
+
+
+@dp.message(Command('reset'), VlessBotState.waiting_rules)
+async def vless_bot_reset(message: Message,state: FSMContext):
+    if not is_admin(message.from_user.id):return
+    await state.update_data(parts=[])
+    await message.answer('Черновик DIRECT очищен. Присылай правила и нажми /done.')
+
+
+@dp.message(Command('done'), VlessBotState.waiting_rules)
+async def vless_bot_rules_done(message: Message,state: FSMContext):
+    if not is_admin(message.from_user.id):return
+    draft=await state.get_data()
+    chunks=draft.get('parts',[])
+    rules=[x.strip() for part in chunks for x in part.splitlines() if x.strip()]
+    if rules==['-']:rules=[]
+    try: vc.update_settings(direct_rules=rules)
+    except ValueError as exc:
+        await message.answer(_escape_auto(str(exc)),parse_mode='HTML');return
+    await state.clear()
+    await message.answer(f'✅ DIRECT-правила обновлены ({len(rules)})',reply_markup=_vless_keyboard())
+
+
+@dp.message(VlessBotState.waiting_links)
+@dp.message(VlessBotState.waiting_profile_name)
+@dp.message(VlessBotState.waiting_node_name)
+@dp.message(VlessBotState.waiting_node_uri)
+@dp.message(VlessBotState.waiting_probe)
+@dp.message(VlessBotState.waiting_rules)
+async def vless_bot_input(message: Message,state: FSMContext):
+    if not is_admin(message.from_user.id) or message.chat.type!='private':return
+    value=(message.text or '').strip()
+    mode=await state.get_state()
+    if not value or value.startswith('/'):
+        await message.answer('Пришли текст или /cancel');return
+    if mode==VlessBotState.waiting_rules.state:
+        draft=await state.get_data()
+        parts=draft.get('parts',[])
+        if sum(len(x) for x in parts)+len(value)>65000:
+            await message.answer('Слишком много правил');return
+        parts.append(value)
+        await state.update_data(parts=parts)
+        await message.answer(f'Принята часть {len(parts)}. /done — сохранить, /reset — начать заново.')
+        return
+    try:
+        if mode==VlessBotState.waiting_links.state:
+            vc.add_links(value)
+            text='✅ Ключи добавлены; JSON обновлён.'
+        elif mode==VlessBotState.waiting_profile_name.state:
+            vc.update_settings(name=value)
+            text='✅ Название Vless config обновлено.'
+        elif mode==VlessBotState.waiting_probe.state:
+            vc.update_settings(probe_url=value)
+            text='✅ URL проверки обновлён.'
+        else:
+            draft=await state.get_data();ident=draft.get('node_id')
+            if mode==VlessBotState.waiting_node_name.state:
+                vc.update_node(ident,name=value);text='✅ Имя сервера изменено.'
+            elif mode==VlessBotState.waiting_node_uri.state:
+                vc.update_node(ident,uri=value);text='✅ VLESS-ключ заменён.'
+            else:return
+    except ValueError as exc:
+        await message.answer('❌ '+_escape_auto(str(exc)),parse_mode='HTML');return
+    await state.clear()
+    await message.answer(text,reply_markup=_vless_keyboard())
