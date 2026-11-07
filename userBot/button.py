@@ -46,6 +46,7 @@ def get_key_keyboard(sub_id: str):
     # Отдельное продление одного ключа намеренно отсутствует.
     return _markup([
         [("📱 Управление устройствами", f"devices:{sub_id}")],
+        [("🚫 Заблокированные устройства", f"banlist:{sub_id}")],
         [("🗑 Удалить ключ", f"keydel:{sub_id}")],
         _nav("my_keys"),
     ])
@@ -64,10 +65,16 @@ def device_token(hwid: str) -> str:
 
 def get_devices_keyboard(user):
     rows = []
-    for device in user.current_device or []:
+    for index, device in enumerate(user.current_device or [], 1):
         token = device_token(device.get("hwid") or "")
-        model = device.get("device_model") or "Неизвестное устройство"
-        rows.append([(f"❌ Отключить {model}", f"devdel:{user.uuid}:{token}")])
+        model = str(device.get("device_model") or "Неизвестное устройство")
+        number_and_model = f"{index}. {model}"
+        # Two actions belonging to the same numbered device on ONE Telegram row.
+        rows.append([
+            (f"❌ Отключиться {number_and_model}", f"devdel:{user.uuid}:{token}"),
+            (f"🚫 Заблокировать {number_and_model}", f"devban:{user.uuid}:{token}"),
+        ])
+    rows.append([('🚫 Заблокированные устройства', f'banlist:{user.uuid}')])
     rows.append(_nav(f"key:{user.uuid}"))
     return _markup(rows)
 
@@ -138,4 +145,20 @@ def get_expiry_keyboard(users):
     rows.extend([[(f"🗑 Удалить {u.name}", f"keydel:{u.uuid}")] for u in (users or [])])
     rows.append([("🛠 Редактировать ключи", "my_keys")])
     rows.append([("🏠 На главную", "main")])
+    return _markup(rows)
+
+
+def get_device_ban_confirm_keyboard(sub_id,token):
+    return _markup([
+        [('🚫 Да, заблокировать',f'devbanyes:{sub_id}:{token}'),('Нет',f'devices:{sub_id}')],
+        _nav(f'devices:{sub_id}'),
+    ])
+
+
+def get_banned_keyboard(sub_id, items):
+    rows=[]
+    for item in items:
+        hwid=item['hwid']
+        rows.append([(f'✅ Разблокировать {hwid[:18]}',f'devunban:{sub_id}:{device_token(hwid)}')])
+    rows.append(_nav(f'devices:{sub_id}'))
     return _markup(rows)

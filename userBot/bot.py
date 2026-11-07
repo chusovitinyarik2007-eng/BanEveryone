@@ -3,10 +3,10 @@ import os
 from datetime import datetime
 from html import escape
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
 
 import db_driver
@@ -23,6 +23,11 @@ from subscription_service import (
     monthly_price,
 )
 from userBot.button import *
+import bot_access
+import device_bans
+import logging
+from datetime import timezone
+
 
 load_dotenv()
 BOT_TOKEN = os.getenv("USER_BOT_TOKEN")
@@ -33,6 +38,72 @@ USE_PROXY = os.getenv("USE_PROXY", "false").strip().lower() in ("true", "1", "ye
 session = AiohttpSession(proxy=PROXY_ADDRESS) if USE_PROXY else None
 bot = Bot(token=BOT_TOKEN, session=session) if session else Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+
+
+class AccessGuard(BaseMiddleware):
+    """Block *every* user-bot command/callback/FSM event before its handler.
+
+    Old buttons and forged callbacks receive the exact same authorization
+    check. Access requests are the only action available to unapproved users.
+    """
+    async def __call__(self, handler, event, data):
+        actor = getattr(event, "from_user", None)
+        if actor is None:
+            return None
+        import tgbot
+        if tgbot.is_admin(actor.id) or bot_access.status(actor.id) == 'approved':
+            bot_access.remember_username(actor.id, getattr(actor, 'username', None))
+            return await handler(event, data)
+        state = bot_access.status(actor.id)
+        if isinstance(event, CallbackQuery) and event.data == 'access:request' and state not in ('blocked', 'pending'):
+            return await handler(event, data)
+        if isinstance(event, CallbackQuery):
+            await event.answer('Доступ к боту был заблокирован' if state == 'blocked'
+                               else '⛔ Доступ к боту не разрешён', show_alert=True)
+            if state == 'blocked':
+                return None
+        message = event.message if isinstance(event, CallbackQuery) else event
+        if not message or not getattr(message, 'chat', None) or message.chat.type != 'private':
+            return None
+        if state == 'blocked':
+            await message.answer('Доступ к боту был заблокирован')
+        elif state == 'pending':
+            await message.answer('⏳ Заявка на доступ уже отправлена администратору и ожидает решения.')
+        else:
+            await message.answer(
+                '🔐 Доступ к боту предоставляется после одобрения администратором.\n'
+                'Нажмите кнопку для отправки заявки.',
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                    text='📨 Запросить доступ', callback_data='access:request')]]),
+            )
+        return None
+
+
+dp.message.middleware(AccessGuard())
+dp.callback_query.middleware(AccessGuard())
+
+
+@dp.callback_query(F.data == 'access:request')
+async def access_request(callback: CallbackQuery):
+    tg_id = callback.from_user.id
+    result = bot_access.request_access(tg_id, callback.from_user.username)
+    if result == 'blocked':
+        await callback.answer('Доступ заблокирован', show_alert=True)
+        return
+    if result == 'approved':
+        await callback.answer('Доступ уже предоставлен', show_alert=True)
+        return
+    if result == 'pending':
+        await callback.answer('Заявка уже рассматривается', show_alert=True)
+        return
+    await callback.answer('Заявка отправлена')
+    await callback.message.answer('✅ Запрос отправлен администратору. Повторная отправка не требуется.')
+    try:
+        import tgbot
+        await tgbot.send_access_request(tg_id, callback.from_user.username)
+    except Exception:
+        logging.exception('Unable to notify admin of access request from %s', tg_id)
 
 CLIENT_HELP = (
     "📱 <b>Поддерживаются только Happ и Incy.</b>\n"
@@ -357,6 +428,53 @@ async def delete_one_sub_confirm(callback: CallbackQuery):
     )
 
 
+def _panel_time(value):
+    try:
+        number = float(value)
+        if not number:
+            return 'нет данных'
+        if number > 1e11:
+            number /= 1000
+        return datetime.fromtimestamp(number, timezone.utc).strftime('%d.%m.%Y %H:%M UTC')
+    except (ValueError, TypeError, OverflowError, OSError):
+        return 'нет данных'
+
+
+def _device_metadata(local_devices, panel_devices):
+    """Match panel metadata only when correspondence is unambiguous.
+
+    Standard 3x-ui deliberately does not expose full HWID. Do not accidentally
+    attribute another device's userAgent/timestamps to this HWID.
+    """
+    matched = {}
+    remaining = set(range(len(panel_devices)))
+    for i, d in enumerate(local_devices):
+        hwid = str(d.get('hwid') or '')
+        candidates = [j for j in remaining if str(panel_devices[j].get('hwid') or '') == hwid]
+        if len(candidates) == 1:
+            matched[i] = panel_devices[candidates[0]]
+            remaining.remove(candidates[0])
+    for i, d in enumerate(local_devices):
+        if i in matched:
+            continue
+        model = str(d.get('device_model') or '').strip().casefold()
+        osname = str(d.get('device_os') or '').strip().casefold()
+        candidates = [j for j in remaining if
+                      model and osname and model not in ('n/a','неизвестное устройство') and
+                      osname not in ('n/a','неизвестно') and
+                      str(panel_devices[j].get('deviceModel') or '').strip().casefold() == model and
+                      str(panel_devices[j].get('deviceOs') or '').strip().casefold() == osname]
+        others_same = sum(1 for n,d2 in enumerate(local_devices) if n not in matched and
+                          str(d2.get('device_model') or '').strip().casefold() == model and
+                          str(d2.get('device_os') or '').strip().casefold() == osname)
+        if len(candidates) == 1 and others_same == 1:
+            matched[i] = panel_devices[candidates[0]]
+            remaining.remove(candidates[0])
+    if len(local_devices) == len(panel_devices) == 1:
+        matched.setdefault(0,panel_devices[0])
+    return matched
+
+
 @dp.callback_query(F.data.startswith("devices:"))
 async def devices_menu(callback: CallbackQuery):
     await callback.answer()
@@ -366,15 +484,30 @@ async def devices_menu(callback: CallbackQuery):
         await callback.answer("❌ Ключ больше недоступен", show_alert=True)
         return
     devices = user.current_device or []
+    panel_devices = []
+    try:
+        # One HWID may be reported under both base and --rest. Prefer the
+        # base client's authoritative list; only fall back to --rest if empty.
+        panel_devices = await xui_connection.get_client_hwids(user.name)
+        if not panel_devices:
+            panel_devices = await xui_connection.get_client_hwids(user.name + '--rest')
+    except Exception:
+        logging.exception('3x-ui HWID metadata not available for %s',user.name)
+    matched = _device_metadata(devices,panel_devices)
     lines = [f"📱 <b>Устройства — {escape(str(user.name))}</b>"]
     if not devices:
         lines.append("\n🔴 Подключённых устройств пока нет.")
     else:
         lines.append("")
-        for i, device in enumerate(devices, 1):
+        for i, device in enumerate(devices):
+            panel = matched.get(i, {})
             lines.append(
-                f"{i}. <b>{escape(str(device.get('device_model') or 'Неизвестное устройство'))}</b>\n"
-                f"   OS: {escape(str(device.get('device_os') or 'Неизвестно'))}"
+                f"{i+1}. <b>{escape(str(device.get('device_model') or 'Неизвестное устройство'))}</b>\n"
+                f"   OS: {escape(str(device.get('device_os') or 'Неизвестно'))}\n"
+                f"   HWID: <code>{escape(str(device.get('hwid') or 'нет данных'))}</code>\n"
+                f"   User-Agent: <code>{escape(str(panel.get('userAgent') or 'нет данных'))}</code>\n"
+                f"   Первое появление: {escape(_panel_time(panel.get('firstSeen', panel.get('firstSeenAt'))))}\n"
+                f"   Последнее появление: {escape(_panel_time(panel.get('lastSeen', panel.get('lastSeenAt'))))}"
             )
     await callback.message.edit_text(
         "\n\n".join(lines),
@@ -402,9 +535,11 @@ async def remove_device_confirm(callback: CallbackQuery):
     if not device:
         await callback.answer("Устройство не найдено", show_alert=True)
         return
+    device_num = next(i for i, d in enumerate(user.current_device or [], 1)
+                      if d is device)
     await callback.message.edit_text(
-        "❌ Отключить это устройство?\n\n"
-        f"📱 <b>{escape(str(device.get('device_model') or 'Неизвестное устройство'))}</b>\n"
+        f"❌ Отключить устройство {device_num}?\n\n"
+        f"📱 <b>{device_num}. {escape(str(device.get('device_model') or 'Неизвестное устройство'))}</b>\n"
         f"OS: {escape(str(device.get('device_os') or 'Неизвестно'))}\n\n"
         "После отключения обновите подписку в VPN-клиенте на остальных устройствах, "
         "чтобы они получили актуальные данные подключения.",
@@ -440,6 +575,88 @@ async def remove_device_confirm_yes(callback: CallbackQuery):
         "чтобы они получили актуальные данные подключения.",
         reply_markup=get_home_keyboard(),
     )
+
+
+@dp.callback_query(F.data.startswith('devban:'))
+async def ban_device_confirm(callback: CallbackQuery):
+    await callback.answer()
+    try:
+        _, sub_id, token = callback.data.split(':', 2)
+    except ValueError:
+        return
+    user = await _owned(sub_id, callback.from_user.id)
+    device = _find_device_by_token(user, token) if user else None
+    if not device:
+        await callback.message.answer('Устройство не найдено')
+        return
+    device_num = next(i for i, d in enumerate(user.current_device or [], 1)
+                      if d is device)
+    await callback.message.edit_text(
+        f"🚫 Заблокировать устройство {device_num}. "
+        f"{escape(str(device.get('device_model') or 'Неизвестное устройство'))}?\n"
+        f"HWID: <code>{escape(str(device['hwid']))}</code>\n"
+        'Слот будет освобождён, а повторная регистрация этого HWID запрещена.',
+        parse_mode='HTML',
+        reply_markup=get_device_ban_confirm_keyboard(sub_id,token),
+    )
+
+
+@dp.callback_query(F.data.startswith('devbanyes:'))
+async def ban_device_yes(callback: CallbackQuery):
+    await callback.answer()
+    try:
+        _, sub_id, token = callback.data.split(':', 2)
+    except ValueError:
+        return
+    user = await _owned(sub_id, callback.from_user.id)
+    device = _find_device_by_token(user, token) if user else None
+    if not device:
+        await callback.message.answer('Устройство уже удалено')
+        return
+    try:
+        await service_remove_device(sub_id, str(device['hwid']), callback.from_user.id, permanent_ban=True)
+    except Exception:
+        logging.exception('Could not ban HWID')
+        await callback.message.answer('Не удалось заблокировать устройство. Повторите попытку.')
+        return
+    await callback.message.edit_text('🚫 Устройство заблокировано и слот освобождён.', reply_markup=get_home_keyboard())
+
+
+@dp.callback_query(F.data.startswith('banlist:'))
+async def banned_devices_menu(callback: CallbackQuery):
+    await callback.answer()
+    sub_id=callback.data.split(':',1)[1]
+    user=await _owned(sub_id,callback.from_user.id)
+    if not user:
+        await callback.message.answer('Ключ недоступен')
+        return
+    items=device_bans.list_banned(sub_id)
+    if not items:
+        text='🚫 Заблокированных устройств нет.'
+    else:
+        text='🚫 <b>Заблокированные устройства</b>\n\n'+'\n'.join(
+            f"{i+1}. <code>{escape(item['hwid'])}</code>"
+            for i,item in enumerate(items))
+    await callback.message.edit_text(text,parse_mode='HTML',reply_markup=get_banned_keyboard(sub_id,items))
+
+
+@dp.callback_query(F.data.startswith('devunban:'))
+async def unban_device(callback: CallbackQuery):
+    await callback.answer()
+    try:
+        _,sub_id,token=callback.data.split(':',2)
+    except ValueError:
+        return
+    if not await _owned(sub_id,callback.from_user.id):
+        await callback.message.answer('Ключ недоступен')
+        return
+    items=[v['hwid'] for v in device_bans.list_banned(sub_id) if device_token(v['hwid'])==token]
+    if len(items)!=1:
+        await callback.message.answer('Устройство не найдено либо идентификатор неоднозначен')
+        return
+    device_bans.unban(sub_id,items[0])
+    await callback.message.edit_text('✅ Блокировка HWID снята. Устройство может занять свободный слот.',
+                                     reply_markup=get_home_keyboard())
 
 
 @dp.callback_query(F.data == "add_new_key")
@@ -676,6 +893,8 @@ async def expiry_alert_loop():
                     grouped.setdefault(tg_id, {})[sub_id] = (user, days_left, expiry, due)
 
             for tg_id, entries in grouped.items():
+                if bot_access.status(tg_id) != 'approved':
+                    continue
                 text = ["⚠️ <b>Скоро заканчивается подписка</b>", ""]
                 users = []
                 for user, days_left, expiry, due in entries.values():

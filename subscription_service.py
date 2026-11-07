@@ -111,6 +111,7 @@ def _rest_client_from_base(base_client: dict, rest_email: str, existing_rest: di
         rest.pop(key, None)
 
     rest["email"] = rest_email
+    rest["flow"] = "xtls-rprx-vision"
 
     # Modern GET responses can expose an internal numeric row id separately
     # from the actual VPN UUID.  For the technical client we need the same VPN
@@ -305,6 +306,7 @@ async def create_subscription(tg_id: int, username: str | None, months: int, ant
         "tgId": int(tg_id),
         "limitIp": 0,
         "enable": True,
+        "flow": "xtls-rprx-vision",
     }
     # Основной клиент всегда создаётся только на обычных inbound.
     # Для full технический --rest создаётся отдельно с уникальным внутренним
@@ -350,7 +352,7 @@ async def create_trial_subscription(tg_id: int, username: str | None):
     client = {
         "email": email, "subId": sub_id, "id": credential, "uuid": credential,
         "totalGB": 0, "expiryTime": expiry, "tgId": int(tg_id),
-        "limitIp": 0, "enable": True,
+        "limitIp": 0, "enable": True, "flow": "xtls-rprx-vision",
     }
     await xui_connection.create_client(client, sorted(regular_ids))
     try:
@@ -414,13 +416,16 @@ async def rotate_subscription_credentials(sub_id: str):
     return changed
 
 
-async def remove_device(sub_id: str, hwid: str, tg_id: int):
+async def remove_device(sub_id: str, hwid: str, tg_id: int, *, permanent_ban: bool = False):
     user = db_driver.get_owned_subscription(sub_id, tg_id)
     if not user:
         raise PermissionError("Подписка не принадлежит пользователю")
     if not any(str(d.get("hwid")) == str(hwid) for d in (user.current_device or [])):
         raise RuntimeError("Устройство не найдено")
     await rotate_subscription_credentials(sub_id)
+    if permanent_ban:
+        import device_bans
+        device_bans.ban(sub_id, hwid)
     if not db_driver.remove_single_hwid(sub_id, hwid):
         raise RuntimeError("Не удалось обновить список устройств")
 

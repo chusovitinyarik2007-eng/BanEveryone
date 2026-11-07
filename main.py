@@ -3,6 +3,9 @@ from pathlib import Path
 import classes
 import db_driver
 db_driver.init_db()
+import bot_access, device_bans
+bot_access.init()
+device_bans.init()
 from starlette.staticfiles import StaticFiles
 from classes import settings
 import asyncio
@@ -112,11 +115,18 @@ async def get_sub(request: Request):
     name = user.name
     mx_devices = user.max_device
     device_info = user.current_device
-    userinfo = (await xui_connection.get_user_info(name)).get('obj') or {}
-    userinforest = await xui_connection.get_user_info(name + "--rest")
-    rest_details = (userinforest or {}).get('obj') or {}
+    userinfo = ((await xui_connection.get_user_info(name)) or {}).get('obj') or {}
+    userinforest = (await xui_connection.get_user_info(name + "--rest")) or {}
+    rest_details = userinforest.get('obj') or {}
     used_gb = rest_details.get('usedTraffic', 0)
     totalgb = (rest_details.get('client') or {}).get("totalGB", 0)
+    # Full Telegram ban also disables new subscription delivery.
+    if user.tg_id and bot_access.status(user.tg_id) == "blocked":
+        return make_denied_response(DENIED_LINK)
+    # Device ban applies even to whitelisted subscriptions.
+    hwid = request.headers.get('x-hwid') or request.headers.get('X-HWID')
+    if device_bans.is_banned(uuid, hwid):
+        return make_denied_response(DENIED_LINK)
     if uuid in settings["whitelist"]:
         return await fetch_real_sub(uuid, request, mx_devices, len(device_info), totalgb, used_gb, rest_info=userinforest)
     hwid = request.headers.get('x-hwid') or request.headers.get("X-HWID")
@@ -362,7 +372,6 @@ async def fetch_real_sub(
 
     # AUTO exists only in JSON subscriptions. A missing/removed node or
     # an invalid --rest payload must not break normal subscription delivery.
-    rest_profiles = None
     try:
         main_profiles = smart_routing.read_profiles(resp.content)
         rest_profiles = (smart_routing.read_profiles(rest_resp.content)
@@ -374,8 +383,8 @@ async def fetch_real_sub(
                 panel_inbounds = await xui_connection.get_inbounds_full()
                 smart_routing.sync_panel_inbounds(panel_inbounds)
                 smart_routing.link_profiles_to_inbounds(main_profiles, panel_inbounds)
-                if rest_profiles and rest_sub_id:
-                    smart_routing.link_profiles_to_inbounds(rest_profiles, panel_inbounds, reserve=True)
+                # --rest comes directly from the panel subscription; never remap
+                # it through inbound IDs or remove duplicate endpoints.
             except Exception:
                 import logging
                 logging.getLogger(__name__).exception("Unable to refresh AUTO panel mapping")
@@ -391,15 +400,17 @@ async def fetch_real_sub(
         import logging
         logging.getLogger(__name__).exception("AUTO profile generation failed")
 
-    # Vless config is a separate, precompiled JSON profile appended LAST.
-    # It is available ONLY with the currently enabled, non-expired --rest
-    # anti-block service client and an active 3x-ui JSON subscription.
+    # Additional manual VLESS smart profile, independent of BASE AUTO and --rest
+    # reserve balancer. Only eligible active --rest subscriptions receive it.
+    # The config is compiled on admin changes, not on every subscription fetch.
     try:
         if (rest_sub_id and rest_resp is not None and rest_resp.status_code == 200
                 and rest_profiles and isinstance(smart_routing.read_profiles(resp.content), list)):
-            live_rest = rest_info if rest_info is not None else await xui_connection.get_user_info(
-                db_driver.get_data_by(sub_id).name + '--rest')
-            if vless_config.rest_active(live_rest, restricted_ids=settings.get('restricted_inbounds', [])):
+            live_rest = (rest_info if rest_info is not None
+                         else await xui_connection.get_user_info(
+                            db_driver.get_data_by(sub_id).name + '--rest'))
+            if vless_config.rest_active(
+                    live_rest, restricted_ids=settings.get('restricted_inbounds', [])):
                 content = vless_config.append_cached(content)
     except Exception:
         import logging

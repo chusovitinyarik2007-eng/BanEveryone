@@ -32,6 +32,21 @@ async def backup_db():
             document=FSInputFile(tmp, filename=f"subserver_{stamp}.db"),
             caption=f"Бэкап {stamp}",
         )
+        import bot_access
+        extra=bot_access.access_db_path()
+        if os.path.isfile(extra):
+            extra_tmp=f'/tmp/access_control_{stamp}.db'
+            try:
+                with sqlite3.connect(extra) as src2, sqlite3.connect(extra_tmp) as dst2:
+                    src2.backup(dst2)
+                await tgbot.bot.send_document(
+                    chat_id=tgbot.admins[0],
+                    document=FSInputFile(extra_tmp,filename=f'access_control_{stamp}.db'),
+                    caption='Бэкап допусков и заблокированных HWID',
+                )
+            finally:
+                if os.path.exists(extra_tmp):
+                    os.remove(extra_tmp)
     except Exception as e:
         await tgbot.sendmsg_admin(f"Ошибка бэкапа - {e}")
     finally:

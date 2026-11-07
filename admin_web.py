@@ -124,11 +124,10 @@ def _write_access(req):
 @router.get('/', response_class=HTMLResponse, include_in_schema=False)
 async def admin_page(req: Request):
     template = (ROOT / 'web_subscription' / 'templates' / 'auto_admin.html').read_text(encoding='utf-8')
-    # Absolute static URLs work with both /adm and /adm/ without breaking the
-    # reverse-proxy subscription prefix.
     static_prefix = router_prefix().removesuffix('/adm') + '/static/'
-    template = template.replace('href="static/', 'href="' + static_prefix).replace(
-        'src="static/', 'src="' + static_prefix)
+    for kind in ('href', 'src'):
+        template = template.replace(f'{kind}="/static/', f'{kind}="' + static_prefix)
+        template = template.replace(f'{kind}="static/', f'{kind}="' + static_prefix)
     return HTMLResponse(template, headers=HEADERS)
 
 
@@ -266,6 +265,11 @@ async def delete(req: Request, ident: str):
 async def change_node(req: Request, ident: str, payload: SetNodes):
     _write_access(req)
     try:
+        balancer=rb.get(ident)
+        if not balancer:
+            raise ValueError('Балансировщик не найден')
+        if balancer['scope']=='reserve':
+            raise ValueError('Резервный пул автоматически включает все --rest подключения')
         # Sync with current panel; don't let a caller assign a removed or fake inbound.
         rows = await xui_connection.get_inbounds_full()
         valid = {n['id'] for n in smart.panel_nodes(rows)}
@@ -287,6 +291,7 @@ async def logout(req: Request):
     resp.delete_cookie(SESSION_COOKIE, path=router_prefix(), secure=False, samesite='strict')
     resp.delete_cookie(CHALLENGE_COOKIE, path=router_prefix(), secure=False, samesite='strict')
     return resp
+
 
 # ---------------- Admin: cached VLESS config (independent of BASE AUTO) -----
 

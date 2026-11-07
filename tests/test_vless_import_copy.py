@@ -112,7 +112,7 @@ class CopyAllFrontendTests(unittest.TestCase):
         self.assertIn("navigator.clipboard.writeText(content)", js)
         self.assertIn("document.execCommand('copy')", js)
         self.assertIn("$('vCopyAll').disabled=state.nodes.length===0", js)
-        self.assertIn('static/vless_admin.js?v=20261105-2', html)
+        self.assertIn('/static/vless_admin.js?v=20261107-3', html)
 
 
 if __name__ == '__main__':

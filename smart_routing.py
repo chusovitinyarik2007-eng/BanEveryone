@@ -502,26 +502,32 @@ def build_auto(primary, rest=None, has_reserve=False):
     endpoint_owners = {}
     for ep_id, display_name, _, is_reserve in profiles:
         owner = mapped.get(_profile_mapping_key(ep_id, display_name, is_reserve))
-        endpoint_owners.setdefault((is_reserve, ep_id), set()).add(owner)
+        # A profile not mapped to a panel inbound has no owner.  It must not
+        # turn an otherwise unique endpoint into a collision with a real ID.
+        if owner is not None:
+            endpoint_owners.setdefault((is_reserve, ep_id), set()).add(owner)
     unique = {}
     memberships = {b['id']: [] for b in definitions}
     outputs = []
-    for ident, name, outbound, is_rest in profiles:
+    for profile_index, (ident, name, outbound, is_rest) in enumerate(profiles):
         profile_key = _profile_mapping_key(ident, name, is_rest)
         resolved_id = mapped.get(profile_key)
-        # An endpoint without a verified panel-inbound mapping has no pool
-        # membership. Skip it BEFORE computing a collision-specific tag:
-        # resolved_id is None for those endpoints, and calling .replace()
-        # on it used to crash subscription generation.
         membership = configured.get(resolved_id, []) if resolved_id else []
         eligible = [b for b in definitions if b['scope'] == ('reserve' if is_rest else 'main')
                     and (not is_rest or has_reserve)]
-        selected = [b['id'] for b in eligible if b['id'] in membership]
+        selected = ([b['id'] for b in eligible] if is_rest else
+                    [b['id'] for b in eligible if b['id'] in membership])
+        # Reject unmapped main nodes *before* building a tag from resolved_id.
+        # This is intentional fail-closed behaviour: shared endpoints and an
+        # incomplete panel mapping must not silently inherit someone else's pool.
         if not selected:
             continue
-        collision = len(endpoint_owners[(is_rest, ident)]) > 1
-        scoped_ident = ("reserve_" if is_rest else "main_") + (
-            ident + "_" + resolved_id.replace(":", "_") if collision else ident)
+        collision = len(endpoint_owners.get((is_rest, ident), ())) > 1
+        # Reserve is populated 1:1 from --rest profiles received from the panel.
+        # Do NOT deduplicate by endpoint hash, tag or server name. Two identical
+        # --rest profiles are still distinct selectable balancer nodes.
+        scoped_ident = (f'reserve_{profile_index}_{ident}' if is_rest else
+                        'main_' + (ident + '_' + resolved_id.replace(':', '_') if collision else ident))
         tag = unique.get(scoped_ident)
         if tag is None:
             tag = 'auto_node_' + scoped_ident
@@ -592,6 +598,10 @@ def build_auto(primary, rest=None, has_reserve=False):
     # An empty rule list does not automatically match all traffic: only the
     # explicitly chosen default balancer is used for the final catchall.
     for b in active_defs:
+        # Reserve pools are only reached through fallback; no manual routing
+        # or outbound assignments are ever applied to them.
+        if b['scope'] == 'reserve':
+            continue
         domains, ips = rb.split_rules(b['rules'])
         for kind, values in (('domain', domains), ('ip', ips)):
             if values:

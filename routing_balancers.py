@@ -60,7 +60,7 @@ def _fetch(con):
         except (TypeError, ValueError):
             rules = []
         result.append(dict(zip(('id','name','scope','strategy','fallback','rules','enabled','is_default','priority'),
-                               (row[0],row[1],row[2],row[3],row[4],rules,bool(row[6]),bool(row[7]),row[8]))))
+                               (row[0],row[1],row[2],row[3],row[4],rules if row[2] != 'reserve' else [],bool(row[6]),bool(row[7]),row[8]))))
     return result
 
 
@@ -141,6 +141,10 @@ def update(ident, **changes):
                 con.execute('UPDATE smart_balancers SET is_default=0 WHERE id<>?', (ident,))
         if 'enabled' in changes:
             changes['enabled'] = bool(changes['enabled'])
+        if (changes.get('scope',match['scope']) == 'reserve') and changes.get('rules'):
+            raise ValueError('Резервный пул не поддерживает ручные правила')
+        if changes.get('scope') == 'reserve':
+            changes['rules'] = []
         match.update(changes)
         if match['is_default'] and match['scope'] == 'reserve':
             raise ValueError('Резервный балансировщик не может быть основным')

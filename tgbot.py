@@ -16,6 +16,9 @@ from aiogram.exceptions import TelegramRetryAfter
 import xui_connection
 from classes import settings
 import db_driver
+import bot_access
+import logging
+from html import escape as html_escape
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -37,6 +40,9 @@ class UploadState(StatesGroup):
 
 class BroadcastState(StatesGroup):
     waiting_message = State()
+
+class BotAccessState(StatesGroup):
+    waiting_tg_id = State()
 
 def is_admin(id):
     return id in admins
@@ -89,9 +95,17 @@ async def start(message: Message):
                          "<code>/alertset</code> &lt;1,3,...&gt; - дни предупреждений об окончании\n"
                          "<code>/loaddb</code> - загрузить базу данных\n"
                          "<code>/sendtoall</code> - отправить сообщение всем пользователям\n"
-                         "<code>/rmdevice</code> uuid &lt;hwid1, hwid2, ...&gt;",
+                         "<code>/rmdevice</code> uuid &lt;hwid1, hwid2, ...&gt;\n"
+                         "<code>/botpending</code> — заявки на доступ\n"
+                         "<code>/botusers</code> — последние статусы\n"
+                         "<code>/botallow</code> id — разрешить доступ\n"
+                         "<code>/botrevoke</code> id — отозвать доступ к боту\n"
+                         "<code>/botblock</code> id — полный бан бота и VPN\n"
+                         "<code>/botunblock</code> id — снять полный бан\n"
+                         "<code>/botmenu</code> — управление доступом через меню",
                          parse_mode="HTML"
                          )
+    await message.answer('👥 Управление пользователями и доступом', reply_markup=_botaccess_home_keyboard())
 
 @dp.callback_query(F.data.startswith('adminweb:'))
 async def web_login_callback(callback: CallbackQuery):
@@ -548,7 +562,8 @@ async def send_to_all_message(message: Message, state: FSMContext):
         )
         return
 
-    recipients = sorted(db_driver.get_all_tg_id())
+    recipients = sorted(tg_id for tg_id in db_driver.get_all_tg_id()
+                        if bot_access.status(tg_id) == "approved")
     if not recipients:
         await state.clear()
         await message.answer("Нет пользователей для рассылки.")
@@ -747,6 +762,178 @@ async def sendmsg_admin(text):
     await bot.send_message(admins[0], text)
 
 
+async def send_access_request(tg_id: int, username: str | None):
+    """Deliver requests to the SERVICE bot, not the user bot."""
+    display=html_escape('@'+username if username else 'без username')
+    kb=InlineKeyboardBuilder()
+    kb.add(InlineKeyboardButton(text='✅ Разрешить',callback_data=f'accessreq:yes:{tg_id}'))
+    kb.add(InlineKeyboardButton(text='❌ Отклонить',callback_data=f'accessreq:no:{tg_id}'))
+    kb.add(InlineKeyboardButton(text='🚫 Заблокировать',callback_data=f'accessreq:block:{tg_id}'))
+    kb.adjust(2, 1)
+    for admin in admins:
+        await bot.send_message(admin,
+            f'🔐 <b>Запрос доступа к пользовательскому боту</b>\n'
+            f'Пользователь: {display}\nTelegram ID: <code>{tg_id}</code>',
+            parse_mode='HTML',reply_markup=kb.as_markup())
+
+
+async def _set_panel_clients_enabled(tg_id: int, enabled: bool):
+    """Disable/restore panel clients while preserving pre-ban enable flags."""
+    users=db_driver.get_data_by_tg_id(tg_id) or []
+    problems=[]
+    original=bot_access.panel_client_states(tg_id)
+    for user in users:
+        for email in (user.name,user.name+'--rest'):
+            if enabled and email not in original:
+                # Never enable clients we did not disable on full ban.
+                continue
+            try:
+                data=await xui_connection.get_user_info(email)
+                obj=(data or {}).get('obj') or {}
+                client=obj.get('client')
+                if not isinstance(client,dict):
+                    if enabled:
+                        bot_access.clear_panel_client_state(tg_id,email)
+                    elif not email.endswith('--rest'):
+                        problems.append(f'{email}: запись не найдена')
+                    continue
+                if not enabled:
+                    bot_access.remember_panel_client_state(tg_id,email,client.get('enable',True))
+                target=original[email] if enabled else False
+                payload=dict(client)
+                payload['enable']=target
+                await xui_connection.update_client(email,payload,obj.get('inboundIds') or [])
+                if enabled:
+                    bot_access.clear_panel_client_state(tg_id,email)
+            except Exception as exc:
+                problems.append(f'{email}: {exc}')
+    return problems
+
+
+async def _apply_bot_access_action(tg_id: int, action: str):
+    """One entrypoint for access requests, commands, and administrator menus.
+
+    Returns (administrator_result, user_notification). Raises on unexpected
+    transitions. Existing disabled 3x-ui clients are restored only to their
+    pre-ban state, as recorded in access_control.db.
+    """
+    tg_id = int(tg_id)
+    if tg_id <= 0:
+        raise ValueError('Некорректный Telegram ID')
+    old = bot_access.status(tg_id)
+    if action == 'block':
+        bot_access.set_status(tg_id, 'blocked')
+        issues = await _set_panel_clients_enabled(tg_id, False)
+        note = '🚫 Пользователь полностью заблокирован. VPN-клиенты отключены в панели.'
+        if issues:
+            note += '\n⚠️ Некоторые подключения могли остаться включены: ' + '; '.join(issues)[:900]
+        return note, 'Доступ к боту был заблокирован'
+    if action == 'revoke':
+        if old == 'blocked':
+            raise ValueError('Для полного бана используйте «Снять бан».')
+        bot_access.set_status(tg_id, 'revoked')
+        return '🔒 Доступ к боту отозван, VPN-клиенты не отключены.', '🔒 Доступ к боту отозван. Подайте заявку повторно.'
+    if action == 'allow':
+        bot_access.set_status(tg_id, 'approved')
+        message = '✅ Доступ к боту предоставлен.'
+        if old == 'blocked':
+            issues = await _set_panel_clients_enabled(tg_id, True)
+            message += ' Состояние VPN-клиентов восстановлено.' if not issues else ' ⚠️ Ошибки: ' + '; '.join(issues)[:900]
+        return message, '✅ Администратор разрешил доступ! Отправьте /start.'
+    if action == 'unblock':
+        if old != 'blocked':
+            raise ValueError('Пользователь не находится в полном бане.')
+        bot_access.set_status(tg_id, 'revoked')
+        issues = await _set_panel_clients_enabled(tg_id, True)
+        message = '🔓 Полный бан снят. Для доступа к боту необходима новая заявка.'
+        if issues:
+            message += ' ⚠️ Ошибки восстановления: ' + '; '.join(issues)[:900]
+        return message, '🔓 Блокировка снята. Чтобы пользоваться ботом, отправьте новую заявку.'
+    raise ValueError('Неизвестное действие')
+
+
+async def _notify_access_user(tg_id: int, notification: str):
+    try:
+        import userBot.bot as userbot
+        await userbot.bot.send_message(tg_id, notification)
+    except Exception:
+        logging.exception('Cannot notify user %s about access change', tg_id)
+
+
+@dp.callback_query(F.data.startswith('accessreq:'))
+async def access_request_review(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer('Нет доступа', show_alert=True)
+        return
+    try:
+        _, answer, raw_id = callback.data.split(':', 2)
+        tg_id = int(raw_id)
+    except (ValueError, AttributeError):
+        await callback.answer('Неверная заявка', show_alert=True)
+        return
+    if answer == 'block':
+        # An administrator can fully block even an already-rejected request.
+        message, notification = await _apply_bot_access_action(tg_id, 'block')
+    else:
+        desired = 'approved' if answer == 'yes' else 'revoked' if answer == 'no' else None
+        if not desired or not bot_access.resolve(tg_id, 'pending', desired):
+            await callback.answer('Заявка уже рассмотрена', show_alert=True)
+            return
+        message = ('✅ Доступ одобрен.' if answer == 'yes' else '❌ Заявка отклонена.')
+        notification = ('✅ Администратор разрешил доступ! Отправьте /start.'
+                        if answer == 'yes' else '❌ Администратор отклонил заявку. Вы можете подать новый запрос.')
+    await callback.answer('Решение сохранено')
+    if callback.message:
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(f'{message}\nID: <code>{tg_id}</code>', parse_mode='HTML')
+    await _notify_access_user(tg_id, notification)
+
+
+async def _access_admin_command(message: Message, command: CommandObject, action: str):
+    if not is_admin(message.from_user.id):
+        return
+    try:
+        tg_id = int((command.args or '').strip().split()[0])
+    except (ValueError, IndexError):
+        await message.answer(f'Использование: /bot{action} <telegram_id>')
+        return
+    try:
+        note, notification = await _apply_bot_access_action(tg_id, action)
+    except ValueError as error:
+        await message.answer(str(error))
+        return
+    await message.answer(f'{html_escape(note)}\nID: <code>{tg_id}</code>', parse_mode='HTML')
+    await _notify_access_user(tg_id, notification)
+
+
+@dp.message(Command('botallow'))
+async def botallow(message: Message, command: CommandObject):
+    await _access_admin_command(message, command, 'allow')
+
+@dp.message(Command('botrevoke'))
+async def botrevoke(message: Message, command: CommandObject):
+    await _access_admin_command(message, command, 'revoke')
+
+@dp.message(Command('botblock'))
+async def botblock(message: Message, command: CommandObject):
+    await _access_admin_command(message, command, 'block')
+
+@dp.message(Command('botunblock'))
+async def botunblock(message: Message, command: CommandObject):
+    await _access_admin_command(message, command, 'unblock')
+
+@dp.message(Command('botpending'))
+async def botpending(message: Message):
+    if is_admin(message.from_user.id):
+        await _send_botaccess_list(message, 'pending', 0)
+
+
+@dp.message(Command('botusers'))
+async def botusers(message: Message):
+    if is_admin(message.from_user.id):
+        await _send_botaccess_list(message, 'all', 0)
+
+
 async def send_subscription_request(request_id: int):
     """Отправляет администратору запрос пользователя на новую подписку/продление."""
     req = db_driver.get_request(request_id)
@@ -927,7 +1114,7 @@ def _auto_keyboard(items, width=2):
 
 
 def _auto_home():
-    switches = [(f"{'✅' if smart_routing.enabled() else '❌'} BASE AUTO", "auto:master")]
+    switches = [(f"{'✅' if smart_routing.enabled() else '❌'} AUTO", "auto:master")]
     switches.extend([("🗂 Балансировщики", "auto2:list"),
                      (f"⏱ Проверка: {rb.interval()}", "auto2:interval"),
                      ("✏️ Название AUTO", "auto:rename"),
@@ -967,15 +1154,11 @@ def _page_controls(entries, pool, page):
 async def auto_menu(message: Message):
     if not is_admin(message.from_user.id):
         return
-    await message.answer("🔀 <b>Умные подключения /auto</b>\n"
-                         "BASE AUTO — прежняя маршрутизация из 3x-ui.\n"
-                         "Vless config — отдельный кешированный профиль из ручных VLESS.\n"
-                         "Управлять можно здесь или во вкладках веб-панели.",
-                         reply_markup=_auto_keyboard([
-                             ("🔀 BASE AUTO", "auto:home"),
-                             ("🚀 Vless config", "av:home"),
-                             ("🌐 Веб-панель", "auto:web"),
-                         ],1), parse_mode="HTML")
+    await message.answer("🔀 <b>AUTO · настройка JSON-подписки</b>\n"
+                         "Создавайте балансировщики с правилами, стратегией и fallback.\n"
+                         "Старые RU-правила DIRECT сохранены; редактируются в веб-панели.\n"
+                         "Пулы выбираются из инбаундов панели; отсутствующие узлы игнорируются.",
+                         reply_markup=_auto_home(), parse_mode="HTML")
 
 
 @dp.callback_query(F.data.startswith("auto:"))
@@ -1104,6 +1287,10 @@ async def auto_callbacks(callback: CallbackQuery, state: FSMContext):
 async def _auto_finish_rules(reply_message: Message, state: FSMContext, data: dict):
     """Commit only a complete, validated draft; keep old rules on any error."""
     pool = data.get("auto_pool")
+    if pool != 'ru' and rb.get(pool) and rb.get(pool)['scope']=='reserve':
+        await state.clear()
+        await reply_message.answer('Резерв не поддерживает ручные правила.')
+        return
     if pool != 'ru' and not rb.get(pool):
         await reply_message.answer("Балансировщик не найден. Откройте /auto заново.")
         return
@@ -1226,8 +1413,10 @@ def _balancer_list_keyboard():
 def _balancer_detail_keyboard(b):
     bid = b['id']
     return _auto_keyboard([
-        ('🖧 Серверы', f'auto2:nodes:{bid}:0'),
-        ('📝 Правила', f'auto:edit:{bid}'),
+        *([] if b['scope'] == 'reserve' else [
+            ('🖧 Серверы', f'auto2:nodes:{bid}:0'),
+            ('📝 Правила', f'auto:edit:{bid}'),
+        ]),
         ('🔀 Стратегия', f'auto2:strategies:{bid}'),
         ('↪️ Fallback', f'auto2:falloptions:{bid}'),
         (f"{'✅' if b['enabled'] else '⏸'} Включён", f'auto2:enabled:{bid}'),
@@ -1256,9 +1445,10 @@ async def _balancer_show(callback, ident):
         f"Серверы: {label}\n"
         f"Стратегия: <code>{b['strategy']}</code>\n"
         f"Fallback: {_escape_auto(fallback)}\n"
-        f"Правил: {len(b['rules'])} · Приоритет: {b['priority']}\n"
-        f"Назначенные подключения используются только этим пулом.\n\n"
-        "Правила панели DIRECT/BLOCK всегда выше этих правил.", _balancer_detail_keyboard(b))
+        f"Правил: {0 if b['scope']=='reserve' else len(b['rules'])} · Приоритет: {b['priority']}\n"
+        + ("Все подключения --rest автоматически включены; ручные серверы и правила не используются.\n\n"
+           if b['scope']=='reserve' else "Назначенные подключения используются только этим пулом.\n\n")
+        + "Правила панели DIRECT/BLOCK всегда выше этих правил.", _balancer_detail_keyboard(b))
 
 
 def _dynamic_node_controls(entries, pool, page):
@@ -1286,6 +1476,9 @@ async def auto_dynamic_callbacks(callback: CallbackQuery, state: FSMContext):
     items = callback.data.split(':')
     action = items[1]
     ident = items[2] if len(items) > 2 else ''
+    if action in ('nodes', 'toggle') and rb.get(ident) and rb.get(ident)['scope'] == 'reserve':
+        await callback.answer('Резерв автоматически получает все --rest подключения',show_alert=True)
+        return
     if action == 'list':
         await _auto_render(callback,
             '🗂 <b>Балансировщики AUTO</b>\n'
@@ -1443,6 +1636,192 @@ async def auto_dynamic_text(message: Message, state: FSMContext):
         return
     await state.clear()
     await message.answer(_escape_auto(text), reply_markup=_auto_home())
+
+
+# ─── Service bot: Telegram access management ─────────────────────────────────
+_BOTACCESS_PAGE = 8
+_BOTACCESS_STATUSES = {
+    'approved': '✅ Разрешён', 'pending': '⏳ Заявка',
+    'revoked': '🔒 Доступ отозван', 'blocked': '🚫 Заблокирован',
+    'new': '⚪ Новый',
+}
+
+
+def _botaccess_markup(rows):
+    builder = InlineKeyboardBuilder()
+    for row in rows:
+        for label, data in row:
+            builder.add(InlineKeyboardButton(text=label, callback_data=data))
+    # Do not call adjust with number of all buttons (Telegram row limit is 8).
+    builder.adjust(*[len(row) for row in rows])
+    return builder.as_markup()
+
+
+def _botaccess_home_keyboard():
+    return _botaccess_markup([
+        [('📨 Заявки на доступ', 'botadm:list:pending:0')],
+        [('🕘 Последние заявки / пользователи', 'botadm:list:recent:0')],
+        [('👥 Все пользователи', 'botadm:list:all:0')],
+        [('🚫 Заблокированные', 'botadm:list:blocked:0')],
+        [('🔎 Ввести Telegram ID', 'botadm:input')],
+    ])
+
+
+def _botaccess_username(entry):
+    name = (entry or {}).get('username') or ''
+    return '@' + name.lstrip('@') if name else 'username отсутствует'
+
+
+def _botaccess_list_data(group: str, page: int):
+    group = group if group in ('pending', 'recent', 'all', 'blocked') else 'all'
+    filt = group if group in ('pending', 'blocked') else None
+    total = bot_access.count_requests() if group == 'recent' else bot_access.count_users(filt)
+    last_page = max(0, (total - 1) // _BOTACCESS_PAGE)
+    page = min(max(0, int(page)), last_page)
+    entries = (bot_access.list_requests(limit=_BOTACCESS_PAGE, offset=page * _BOTACCESS_PAGE)
+               if group == 'recent' else bot_access.list_users(filt, limit=_BOTACCESS_PAGE,
+                                                                offset=page * _BOTACCESS_PAGE))
+    labels = {'all': 'Все пользователи', 'pending': 'Необработанные заявки',
+              'recent': 'Последние заявки на доступ', 'blocked': 'Заблокированные пользователи'}
+    lines = [f'<b>{labels[group]}</b> — {total}\nСтраница {page + 1}/{last_page + 1}\n']
+    rows = []
+    for item in entries:
+        id_ = item['tg_id']
+        username = html_escape(_botaccess_username(item))
+        state = _BOTACCESS_STATUSES.get(item['status'], item['status'])
+        lines.append(f'{state} • ID: <code>{id_}</code> • {username}')
+        label = f'{id_} · {_botaccess_username(item)}'
+        if len(label) > 47:
+            label = label[:44] + '…'
+        rows.append([(label, f'botadm:user:{id_}')])
+    if not entries:
+        lines.append('Записей нет.')
+    nav = []
+    if page:
+        nav.append(('◀️', f'botadm:list:{group}:{page - 1}'))
+    if page < last_page:
+        nav.append(('▶️', f'botadm:list:{group}:{page + 1}'))
+    if nav:
+        rows.append(nav)
+    rows.append([('🔎 По Telegram ID', 'botadm:input')])
+    rows.append([('🏠 Меню доступа', 'botadm:home')])
+    return '\n'.join(lines), _botaccess_markup(rows)
+
+
+async def _send_botaccess_list(message: Message, group: str, page: int, edit: bool = False):
+    text, keyboard = _botaccess_list_data(group, page)
+    if edit:
+        await message.edit_text(text, parse_mode='HTML', reply_markup=keyboard)
+    else:
+        await message.answer(text, parse_mode='HTML', reply_markup=keyboard)
+
+
+def _botaccess_user_data(tg_id: int):
+    entry = bot_access.get_user(tg_id)
+    if entry is None:
+        entry = {'tg_id': tg_id, 'username': '', 'status': 'new', 'updated_at': '—'}
+    status = entry['status']
+    text = (f'<b>Пользователь</b>\n'
+            f'ID: <code>{tg_id}</code>\n'
+            f'Username: {html_escape(_botaccess_username(entry))}\n'
+            f'Статус: {_BOTACCESS_STATUSES.get(status, status)}\n'
+            f'Обновлено: {html_escape(str(entry.get("updated_at") or "—"))}')
+    rows = []
+    if status == 'pending':
+        rows.append([('✅ Одобрить', f'botadm:act:allow:{tg_id}'),
+                     ('❌ Отклонить', f'botadm:act:revoke:{tg_id}')])
+    elif status in ('revoked', 'new'):
+        rows.append([('✅ Дать доступ', f'botadm:act:allow:{tg_id}')])
+    elif status == 'approved':
+        rows.append([('🔒 Отозвать доступ', f'botadm:act:revoke:{tg_id}')])
+    if status == 'blocked':
+        rows.append([('🔓 Снять полный бан', f'botadm:act:unblock:{tg_id}')])
+    else:
+        rows.append([('🚫 Полностью заблокировать', f'botadm:confirm:block:{tg_id}')])
+    rows.append([('⬅️ Все пользователи', 'botadm:list:all:0'),
+                 ('🏠 Меню', 'botadm:home')])
+    return text, _botaccess_markup(rows)
+
+
+@dp.message(Command('botmenu'))
+@dp.message(Command('botaccess'))
+async def botaccess_menu(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id) or message.chat.type != 'private':
+        return
+    await state.clear()
+    await message.answer('👥 <b>Управление доступом к боту</b>',
+                         parse_mode='HTML', reply_markup=_botaccess_home_keyboard())
+
+
+@dp.callback_query(F.data.startswith('botadm:'))
+async def botaccess_callbacks(callback: CallbackQuery, state: FSMContext):
+    if (not is_admin(callback.from_user.id) or not callback.message
+            or callback.message.chat.type != 'private'):
+        await callback.answer('Нет доступа', show_alert=True)
+        return
+    parts = (callback.data or '').split(':')
+    try:
+        kind = parts[1]
+        if kind == 'home':
+            await state.clear()
+            await callback.message.edit_text('👥 <b>Управление доступом к боту</b>',
+                                             parse_mode='HTML', reply_markup=_botaccess_home_keyboard())
+        elif kind == 'input':
+            await state.set_state(BotAccessState.waiting_tg_id)
+            await callback.message.edit_text('🔎 Отправьте Telegram ID пользователя числом.\n'
+                                             'Для отмены выберите кнопку ниже.',
+                                             reply_markup=_botaccess_markup([[('⬅️ Отмена', 'botadm:home')]]))
+        elif kind == 'list':
+            await state.clear()
+            await _send_botaccess_list(callback.message, parts[2], int(parts[3]), edit=True)
+        elif kind == 'user':
+            await state.clear()
+            text, keyboard = _botaccess_user_data(int(parts[2]))
+            await callback.message.edit_text(text, parse_mode='HTML', reply_markup=keyboard)
+        elif kind == 'confirm' and parts[2] == 'block':
+            tg_id = int(parts[3])
+            entry = bot_access.get_user(tg_id)
+            await callback.message.edit_text(
+                f'⚠️ <b>Полный бан</b>\n{html_escape(_botaccess_username(entry))} '
+                f'(<code>{tg_id}</code>)\n\n'
+                'Будет закрыт доступ к боту, подпискам и отключены VPN-клиенты в 3x-ui.\n'
+                'Подтвердить?', parse_mode='HTML', reply_markup=_botaccess_markup([
+                    [('🚫 Да, заблокировать', f'botadm:act:block:{tg_id}')],
+                    [('⬅️ Отмена', f'botadm:user:{tg_id}')],
+                ]))
+        elif kind == 'act':
+            action, tg_id = parts[2], int(parts[3])
+            if action not in ('allow', 'revoke', 'block', 'unblock'):
+                raise ValueError('Некорректное действие')
+            result, notification = await _apply_bot_access_action(tg_id, action)
+            await _notify_access_user(tg_id, notification)
+            text, keyboard = _botaccess_user_data(tg_id)
+            await callback.message.edit_text(text + '\n\n' + html_escape(result),
+                                             parse_mode='HTML', reply_markup=keyboard)
+        else:
+            raise ValueError('Некорректный пункт меню')
+    except (ValueError, IndexError) as exc:
+        await callback.answer(str(exc) or 'Ошибка данных', show_alert=True)
+        return
+    await callback.answer()
+
+
+@dp.message(BotAccessState.waiting_tg_id)
+async def botaccess_input_id(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id) or message.chat.type != 'private':
+        return
+    try:
+        tg_id = int((message.text or '').strip())
+        if tg_id <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer('Введите положительный числовой Telegram ID.',
+                             reply_markup=_botaccess_markup([[('⬅️ Отмена', 'botadm:home')]]))
+        return
+    await state.clear()
+    text, keyboard = _botaccess_user_data(tg_id)
+    await message.answer(text, parse_mode='HTML', reply_markup=keyboard)
+
 
 # ---------------------- Vless config: second /auto profile ------------------
 import vless_config as vc

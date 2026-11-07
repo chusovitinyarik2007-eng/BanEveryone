@@ -17,7 +17,7 @@ class VlessAdminFrontendTests(unittest.TestCase):
 
     def test_vless_script_is_cache_busted(self):
         html = (ROOT / 'web_subscription/templates/auto_admin.html').read_text(encoding='utf-8')
-        self.assertRegex(html, r'src="static/vless_admin\.js\?v=[0-9-]+"')
+        self.assertRegex(html, r'src="/static/vless_admin\.js\?v=[0-9-]+"')
 
 if __name__ == '__main__':
     unittest.main()

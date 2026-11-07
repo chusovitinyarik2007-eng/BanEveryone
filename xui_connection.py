@@ -253,3 +253,18 @@ async def get_inbounds_full():
     """Get actual panel rows (options endpoint may omit edit fields)."""
     data = await _request("GET", "/panel/api/inbounds/list")
     return data.get("obj") or []
+
+
+async def get_client_hwids(email: str) -> list[dict]:
+    """Read live HWID metadata from 3x-ui; no local device metadata changes.
+
+    3x-ui /panel/api/clients/hwids/{email} is POST (not GET).  Panel versions
+    that do not support HWID metadata may return 404; callers display n/a.
+    """
+    from urllib.parse import quote
+    try:
+        data = await _request('POST',f'/panel/api/clients/hwids/{quote(email,safe="")}')
+    except Exception:
+        return []
+    items = data.get('obj') or []
+    return [d for d in items if isinstance(d,dict)] if isinstance(items,list) else []
